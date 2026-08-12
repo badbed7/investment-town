@@ -74,6 +74,7 @@ credentials/
 # Local databases / runtime data
 # ==================================================
 *.db
+*.db-*
 *.sqlite
 *.sqlite3
 postgres-data/

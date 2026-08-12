@@ -30,6 +30,9 @@ flowchart LR
 ## Documentation
 
 - [Product & UX Storyboard](docs/STORYBOARD.md)
+- [MVP 1 API](docs/API.md)
+- [Codespaces and Railway deployment](docs/DEPLOYMENT.md)
+- [Toss Securities live-trading plan](docs/TOSS_LIVE_TRADING_PLAN.md)
 
 ## Repository structure
 
@@ -74,9 +77,14 @@ pip install -e .[dev]
 uvicorn investment_town.main:app --reload
 ```
 
-Then open `http://127.0.0.1:8000/docs`. The current runtime is intentionally **paper-trading only**.
+Then open `http://127.0.0.1:8000` for the mobile-friendly control dashboard or
+`http://127.0.0.1:8000/docs` for the API. The current runtime is intentionally
+**paper-trading only**.
+
+MVP 1 stores project state, events, and audit records in a local SQLite file. This keeps
+the first vertical slice runnable without infrastructure. PostgreSQL and Redis become
+necessary when the control API is deployed with multiple instances.
 
 ## Recommended first milestone
 
 Build the Control Center and Investment Town in **observation + paper trading mode** before any live-order integration.
-

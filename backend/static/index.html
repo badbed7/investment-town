@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Investment Town Control Center</title>
+  <style>
+    :root { color-scheme: dark; font-family: Inter, system-ui, sans-serif; background: #0b1020; color: #edf2ff; }
+    * { box-sizing: border-box; }
+    body { margin: 0; }
+    main { width: min(960px, 100%); margin: auto; padding: 24px 16px 64px; }
+    header, .toolbar, .card, .panel { border: 1px solid #273354; background: #121a30; border-radius: 16px; }
+    header { padding: 22px; margin-bottom: 16px; background: linear-gradient(135deg, #172244, #132f2a); }
+    h1, h2, p { margin-top: 0; }
+    h1 { margin-bottom: 8px; font-size: clamp(1.5rem, 5vw, 2.25rem); }
+    h2 { font-size: 1rem; color: #aebde4; }
+    .toolbar { display: flex; gap: 8px; padding: 12px; margin-bottom: 16px; }
+    input, button { border: 1px solid #34436b; border-radius: 10px; padding: 10px 12px; font: inherit; }
+    input { min-width: 0; flex: 1; background: #0b1020; color: inherit; }
+    button { background: #26365f; color: #fff; cursor: pointer; }
+    button:hover { background: #334b86; }
+    button.danger { background: #742c3a; }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+    .card, .panel { padding: 16px; }
+    .project-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .state { padding: 5px 10px; border-radius: 999px; background: #29375d; font-size: .85rem; }
+    .healthy { color: #83efc4; } .halted, .degraded { color: #ff9d9d; }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+    .panel { margin-top: 16px; }
+    .log { display: grid; gap: 8px; max-height: 320px; overflow: auto; }
+    .entry { padding: 10px; border-radius: 10px; background: #0b1020; font-size: .86rem; }
+    .muted { color: #8e9abc; }
+    #connection { font-size: .85rem; }
+    @media (max-width: 520px) { .toolbar { flex-direction: column; } button { min-height: 44px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Investment Town</h1>
+    <p>모바일 AI 프로젝트 제어 센터 · MVP 1</p>
+    <span id="connection" class="muted">연결 대기</span>
+  </header>
+
+  <section class="toolbar">
+    <input id="token" type="password" autocomplete="off" placeholder="CONTROL_API_TOKEN (개발환경은 비워도 됨)">
+    <button id="connect">연결</button>
+  </section>
+
+  <section id="projects" class="grid"></section>
+
+  <section class="panel">
+    <h2>실시간 이벤트</h2>
+    <div id="events" class="log"><span class="muted">이벤트가 없습니다.</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>감사 로그</h2>
+    <div id="audit" class="log"><span class="muted">명령 기록이 없습니다.</span></div>
+  </section>
+</main>
+<script>
+  const tokenInput = document.querySelector('#token');
+  const projectRoot = document.querySelector('#projects');
+  const eventRoot = document.querySelector('#events');
+  const auditRoot = document.querySelector('#audit');
+  const connection = document.querySelector('#connection');
+  let socket;
+
+  const headers = () => tokenInput.value
+    ? { Authorization: `Bearer ${tokenInput.value}`, 'Content-Type': 'application/json' }
+    : { 'Content-Type': 'application/json' };
+
+  async function api(path, options = {}) {
+    const response = await fetch(`/api/v1${path}`, { ...options, headers: headers() });
+    if (!response.ok) throw new Error((await response.json()).detail || response.statusText);
+    return response.json();
+  }
+
+  function projectCard(project) {
+    const allowed = {
+      start: ['idle', 'stopped', 'failed'], pause: ['running'], resume: ['paused'],
+      stop: ['running', 'paused'], kill: ['idle', 'running', 'paused', 'stopped', 'failed']
+    };
+    const card = document.createElement('article');
+    card.className = 'card';
+    card.innerHTML = `<div class="project-head"><div><strong>${project.name}</strong><div class="muted">${project.project_id}</div></div>
+      <span class="state ${project.health}">${project.state}</span></div><div class="actions"></div>`;
+    for (const command of ['start', 'pause', 'resume', 'stop', 'kill']) {
+      const button = document.createElement('button');
+      button.textContent = command;
+      button.disabled = !allowed[command].includes(project.state);
+      if (command === 'kill') button.className = 'danger';
+      button.onclick = () => sendCommand(project.project_id, command);
+      card.querySelector('.actions').append(button);
+    }
+    return card;
+  }
+
+  async function refresh() {
+    try {
+      const [projects, events, audit] = await Promise.all([
+        api('/projects'), api('/events?limit=30'), api('/audit?limit=30')
+      ]);
+      projectRoot.replaceChildren(...projects.map(projectCard));
+      renderEvents(events);
+      renderAudit(audit);
+    } catch (error) {
+      connection.textContent = `오류: ${error.message}`;
+      connection.className = 'halted';
+    }
+  }
+
+  async function sendCommand(projectId, command) {
+    const reason = prompt(`${command} 사유 (선택)`) || null;
+    try {
+      await api(`/projects/${projectId}/commands/${command}`, {
+        method: 'POST', body: JSON.stringify({ reason })
+      });
+      await refresh();
+    } catch (error) { alert(error.message); }
+  }
+
+  function renderEvents(events) {
+    eventRoot.replaceChildren(...events.map(event => {
+      const node = document.createElement('div');
+      node.className = 'entry';
+      node.textContent = `${new Date(event.created_at).toLocaleString()} · ${event.event_type} · ${event.payload.from_state} → ${event.payload.to_state}`;
+      return node;
+    }));
+    if (!events.length) eventRoot.innerHTML = '<span class="muted">이벤트가 없습니다.</span>';
+  }
+
+  function renderAudit(entries) {
+    auditRoot.replaceChildren(...entries.map(entry => {
+      const node = document.createElement('div');
+      node.className = 'entry';
+      node.textContent = `${new Date(entry.created_at).toLocaleString()} · ${entry.actor} · ${entry.action} · ${entry.from_state} → ${entry.to_state}`;
+      return node;
+    }));
+    if (!entries.length) auditRoot.innerHTML = '<span class="muted">명령 기록이 없습니다.</span>';
+  }
+
+  function connect() {
+    if (socket) socket.close();
+    const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+    socket = new WebSocket(`${protocol}://${location.host}/api/v1/events/stream`);
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ token: tokenInput.value }));
+      connection.textContent = '실시간 연결됨';
+      connection.className = 'healthy';
+    };
+    socket.onmessage = event => {
+      const message = JSON.parse(event.data);
+      if (message.event_type !== 'heartbeat') refresh();
+    };
+    socket.onclose = () => {
+      connection.textContent = '연결 끊김';
+      connection.className = 'halted';
+    };
+    refresh();
+  }
+
+  document.querySelector('#connect').onclick = connect;
+  connect();
+</script>
+</body>
+</html>

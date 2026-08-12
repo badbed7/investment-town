@@ -10,6 +10,9 @@ Python is the source-of-truth runtime for Investment Town.
 - Deterministic research workflow outline
 - Paper broker placeholder
 - Paper-trading-only configuration
+- Durable project registry and command state machine
+- WebSocket event stream and audit log
+- Mobile-friendly control dashboard
 
 ## Run locally
 
@@ -27,6 +30,10 @@ uvicorn investment_town.main:app --reload
 ```
 
 Open `http://127.0.0.1:8000/docs`.
+
+Open `http://127.0.0.1:8000` for the control dashboard. Set `CONTROL_API_TOKEN` before
+exposing the server outside local development. Non-development environments fail closed
+when the token is missing.
 
 ## Important
 
