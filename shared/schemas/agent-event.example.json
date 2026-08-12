@@ -1,0 +1,9 @@
+{
+  "event_type": "analysis.started",
+  "project_id": "investment-town",
+  "agent_id": "quant",
+  "status": "working",
+  "task": "NVDA momentum analysis",
+  "ticker": "NVDA",
+  "payload": {}
+}
