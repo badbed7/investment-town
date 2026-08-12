@@ -1,6 +1,9 @@
 {
   "name": "Investment Town",
   "image": "mcr.microsoft.com/devcontainers/python:1-3.12-bookworm",
+  "features": {
+    "ghcr.io/devcontainers/features/sshd:1": {}
+  },
   "postCreateCommand": "python -m pip install -e './backend[dev]'",
   "forwardPorts": [8000],
   "portsAttributes": {
