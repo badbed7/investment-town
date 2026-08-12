@@ -1,0 +1,21 @@
+id: investment-town
+name: Investment Town
+version: 0.1.0
+runtime: langgraph
+mode: paper-trading
+
+capabilities:
+  - health
+  - status
+  - start
+  - pause
+  - resume
+  - stop
+  - kill
+  - events
+  - approvals
+  - metrics
+  - logs
+
+risk_level: high
+approval_policy: human-required-for-execution
