@@ -4,7 +4,11 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from investment_town.core.config import Settings
-from investment_town.integrations.trading_agents import analyze_with_trading_agents
+from investment_town.integrations.trading_agents import (
+    TradingAgentsUnavailable,
+    TradingProposal,
+    analyze_with_trading_agents,
+)
 from investment_town.main import create_app
 from investment_town.workflows.research import research_workflow_outline
 
@@ -35,7 +39,62 @@ def test_trading_agents_result_is_a_proposal_only() -> None:
     assert proposal.rating == "Overweight"
     assert proposal.suggested_paper_action == "buy"
     assert proposal.human_approval_required is True
+    assert proposal.approval_status == "pending"
     assert proposal.order_created is False
+
+
+def test_research_proposal_api_persists(tmp_path: Path, monkeypatch) -> None:
+    database = tmp_path / "control.db"
+
+    def fake_analysis(ticker: str, analysis_date: date) -> TradingProposal:
+        return TradingProposal(
+            ticker=ticker,
+            analysis_date=analysis_date,
+            rating="Buy",
+            suggested_paper_action="buy",
+            report="Paper proposal only.",
+        )
+
+    monkeypatch.setattr(
+        "investment_town.api.router.analyze_with_trading_agents", fake_analysis
+    )
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/research/proposals",
+            json={"ticker": "nvda", "analysis_date": "2026-08-13"},
+        )
+        assert created.status_code == 201
+        assert created.json()["ticker"] == "NVDA"
+        assert created.json()["approval_status"] == "pending"
+        assert created.json()["order_created"] is False
+
+    reopened = create_app(Settings(database_path=str(database)))
+    with TestClient(reopened) as client:
+        proposals = client.get("/api/v1/research/proposals").json()
+        assert len(proposals) == 1
+        assert proposals[0]["report"] == "Paper proposal only."
+
+
+def test_research_proposal_reports_missing_optional_engine(tmp_path: Path, monkeypatch) -> None:
+    def unavailable(ticker: str, analysis_date: date) -> TradingProposal:
+        raise TradingAgentsUnavailable("install the backend 'agents' extra")
+
+    monkeypatch.setattr("investment_town.api.router.analyze_with_trading_agents", unavailable)
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        response = client.post("/api/v1/research/proposals", json={"ticker": "NVDA"})
+        assert response.status_code == 503
+        assert "agents" in response.json()["detail"]
+
+
+def test_dashboard_exposes_agent_proposal_form(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        response = client.get("/")
+        assert response.status_code == 200
+        assert "MVP 1.2A Agent Proposal" in response.text
+        assert 'id="research-form"' in response.text
 
 
 def test_project_command_persists_event_and_audit(tmp_path: Path) -> None:

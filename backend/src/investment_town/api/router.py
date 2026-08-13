@@ -24,6 +24,12 @@ from investment_town.broker.paper import (
 )
 from investment_town.control import InvalidTransition, ProjectControl
 from investment_town.core.config import Settings
+from investment_town.integrations.trading_agents import (
+    ResearchAnalysisRequest,
+    TradingAgentsUnavailable,
+    TradingProposal,
+    analyze_with_trading_agents,
+)
 from investment_town.schemas.commands import ProjectCommand, ProjectCommandName
 from investment_town.schemas.control import (
     AuditEntry,
@@ -89,6 +95,34 @@ def agents(_: Actor) -> dict[str, object]:
 @router.get("/research/{ticker}/plan")
 def research_plan(ticker: str, _: Actor) -> dict[str, object]:
     return research_workflow_outline(ticker)
+
+
+@router.post("/research/proposals", response_model=TradingProposal, status_code=201)
+async def create_research_proposal(
+    body: ResearchAnalysisRequest,
+    _: Actor,
+    control: Control,
+) -> TradingProposal:
+    try:
+        proposal = await asyncio.to_thread(
+            analyze_with_trading_agents, body.ticker, body.analysis_date
+        )
+    except TradingAgentsUnavailable as error:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from error
+    except Exception as error:
+        raise HTTPException(
+            status.HTTP_502_BAD_GATEWAY, "TradingAgents analysis failed"
+        ) from error
+    return control.store.save_research_proposal(proposal)
+
+
+@router.get("/research/proposals", response_model=list[TradingProposal])
+def research_proposals(
+    _: Actor,
+    control: Control,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> list[TradingProposal]:
+    return control.store.list_research_proposals(limit)
 
 
 @router.get("/projects", response_model=list[Project])

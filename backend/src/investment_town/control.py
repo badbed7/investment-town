@@ -8,6 +8,7 @@ from threading import RLock
 from uuid import uuid4
 
 from investment_town.broker.paper import PaperOrderRequest, PaperOrderResult, PaperStore
+from investment_town.integrations.trading_agents import TradingProposal
 from investment_town.schemas.commands import ProjectCommandName
 from investment_town.schemas.control import (
     AuditEntry,
@@ -85,6 +86,20 @@ class ProjectStore:
                     reason TEXT,
                     from_state TEXT NOT NULL,
                     to_state TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS research_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    ticker TEXT NOT NULL,
+                    analysis_date TEXT NOT NULL,
+                    rating TEXT NOT NULL,
+                    suggested_paper_action TEXT NOT NULL,
+                    report TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    human_approval_required INTEGER NOT NULL,
+                    approval_status TEXT NOT NULL,
+                    order_created INTEGER NOT NULL,
                     created_at TEXT NOT NULL
                 );
                 """
@@ -226,6 +241,32 @@ class ProjectStore:
                 "SELECT * FROM audit_log ORDER BY created_at DESC LIMIT ?", (limit,)
             ).fetchall()
         return [AuditEntry.model_validate(dict(row)) for row in rows]
+
+    def save_research_proposal(self, proposal: TradingProposal) -> TradingProposal:
+        values = proposal.model_dump(mode="json")
+        with self._lock, self._connection:
+            self._connection.execute(
+                """
+                INSERT INTO research_proposals(
+                    proposal_id, project_id, ticker, analysis_date, rating,
+                    suggested_paper_action, report, source, human_approval_required,
+                    approval_status, order_created, created_at
+                ) VALUES (
+                    :proposal_id, :project_id, :ticker, :analysis_date, :rating,
+                    :suggested_paper_action, :report, :source, :human_approval_required,
+                    :approval_status, :order_created, :created_at
+                )
+                """,
+                values,
+            )
+        return proposal
+
+    def list_research_proposals(self, limit: int = 30) -> list[TradingProposal]:
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM research_proposals ORDER BY created_at DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [TradingProposal.model_validate(dict(row)) for row in rows]
 
 
 class EventHub:

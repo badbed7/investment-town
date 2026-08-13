@@ -1,6 +1,8 @@
-from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from typing import Any, Literal, Protocol
+from uuid import UUID, uuid4
+
+from pydantic import BaseModel, Field, field_validator
 
 Rating = Literal["Buy", "Overweight", "Hold", "Underweight", "Sell"]
 PaperAction = Literal["buy", "hold", "sell"]
@@ -20,8 +22,19 @@ class TradingGraphRunner(Protocol):
     ) -> tuple[dict[str, Any], str]: ...
 
 
-@dataclass(frozen=True, slots=True)
-class TradingProposal:
+class ResearchAnalysisRequest(BaseModel):
+    ticker: str = Field(min_length=1, max_length=12, pattern=r"^[A-Za-z0-9.-]+$")
+    analysis_date: date = Field(default_factory=date.today)
+
+    @field_validator("ticker")
+    @classmethod
+    def normalize_ticker(cls, value: str) -> str:
+        return value.upper()
+
+
+class TradingProposal(BaseModel):
+    proposal_id: UUID = Field(default_factory=uuid4)
+    project_id: str = "investment-town"
     ticker: str
     analysis_date: date
     rating: Rating
@@ -29,7 +42,9 @@ class TradingProposal:
     report: str
     source: str = "TauricResearch/TradingAgents"
     human_approval_required: bool = True
+    approval_status: Literal["pending"] = "pending"
     order_created: bool = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class TradingAgentsUnavailable(RuntimeError):
