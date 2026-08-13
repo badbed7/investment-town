@@ -1,10 +1,23 @@
+from datetime import date
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 
 from investment_town.core.config import Settings
+from investment_town.integrations.trading_agents import analyze_with_trading_agents
 from investment_town.main import create_app
 from investment_town.workflows.research import research_workflow_outline
+
+
+class FakeTradingGraph:
+    def __init__(self) -> None:
+        self.call: tuple[str, str, str] | None = None
+
+    def propagate(
+        self, company_name: str, trade_date: str, asset_type: str = "stock"
+    ) -> tuple[dict[str, str], str]:
+        self.call = (company_name, trade_date, asset_type)
+        return {"final_trade_decision": "**Rating**: Overweight"}, "Overweight"
 
 
 def test_research_workflow_is_paper_only() -> None:
@@ -12,6 +25,17 @@ def test_research_workflow_is_paper_only() -> None:
     assert plan["ticker"] == "NVDA"
     assert plan["execution_mode"] == "paper"
     assert plan["stages"][-1] == ["portfolio_manager"]
+
+
+def test_trading_agents_result_is_a_proposal_only() -> None:
+    graph = FakeTradingGraph()
+    proposal = analyze_with_trading_agents("nvda", date(2026, 8, 13), graph=graph)
+
+    assert graph.call == ("NVDA", "2026-08-13", "stock")
+    assert proposal.rating == "Overweight"
+    assert proposal.suggested_paper_action == "buy"
+    assert proposal.human_approval_required is True
+    assert proposal.order_created is False
 
 
 def test_project_command_persists_event_and_audit(tmp_path: Path) -> None:
