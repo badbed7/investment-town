@@ -33,6 +33,7 @@ flowchart LR
 - [MVP 1 API](docs/API.md)
 - [Codespaces and Railway deployment](docs/DEPLOYMENT.md)
 - [Toss Securities live-trading plan](docs/TOSS_LIVE_TRADING_PLAN.md)
+- [TradingAgents reference integration](docs/TRADING_AGENTS_REFERENCE.md)
 
 ## Repository structure
 

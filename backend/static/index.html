@@ -35,16 +35,17 @@
     .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 12px; }
     .metric { padding: 12px; border-radius: 10px; background: #0b1020; }
     .metric strong { display: block; margin-top: 4px; font-size: 1.05rem; }
+    .research-form { display: grid; grid-template-columns: 1.2fr 1fr auto; gap: 8px; margin-bottom: 12px; }
     .order-form { display: grid; grid-template-columns: 1.2fr .8fr .8fr 1fr auto; gap: 8px; }
     .positive { color: #83efc4; } .negative { color: #ff9d9d; }
-    @media (max-width: 680px) { .toolbar, .order-form { grid-template-columns: 1fr; flex-direction: column; } button { min-height: 44px; } }
+    @media (max-width: 680px) { .toolbar, .research-form, .order-form { grid-template-columns: 1fr; flex-direction: column; } button { min-height: 44px; } }
   </style>
 </head>
 <body>
 <main>
   <header>
     <h1>Investment Town</h1>
-    <p>모바일 AI 프로젝트 제어 센터 · MVP 1.1 Paper Trading</p>
+    <p>모바일 AI 프로젝트 제어 센터 · MVP 1.2A Agent Proposal</p>
     <span id="connection" class="muted">연결 대기</span>
   </header>
 
@@ -54,6 +55,17 @@
   </section>
 
   <section id="projects" class="grid"></section>
+
+  <section class="panel">
+    <h2>Agent 분석 제안</h2>
+    <p class="muted">TradingAgents가 분석 제안만 생성합니다. 주문은 생성되지 않으며 LLM API 비용이 발생할 수 있습니다.</p>
+    <form id="research-form" class="research-form">
+      <input id="research-ticker" autocomplete="off" maxlength="12" placeholder="Ticker (예: NVDA)" required>
+      <input id="analysis-date" type="date" aria-label="분석 기준일" required>
+      <button type="submit">분석 실행</button>
+    </form>
+    <div id="research-proposals" class="log"><span class="muted">분석 제안이 없습니다.</span></div>
+  </section>
 
   <section class="panel">
     <h2>Paper 포트폴리오</h2>
@@ -93,6 +105,8 @@
   const auditRoot = document.querySelector('#audit');
   const portfolioRoot = document.querySelector('#portfolio');
   const tradeRoot = document.querySelector('#trades');
+  const proposalRoot = document.querySelector('#research-proposals');
+  const researchForm = document.querySelector('#research-form');
   const orderForm = document.querySelector('#paper-order');
   const connection = document.querySelector('#connection');
   let socket;
@@ -129,15 +143,17 @@
 
   async function refresh() {
     try {
-      const [projects, portfolio, trades, events, audit] = await Promise.all([
+      const [projects, portfolio, trades, proposals, events, audit] = await Promise.all([
         api('/projects'),
         api('/paper/portfolio?project_id=investment-town'),
         api('/paper/trades?project_id=investment-town&limit=30'),
+        api('/research/proposals?limit=10'),
         api('/events?limit=30'), api('/audit?limit=30')
       ]);
       projectRoot.replaceChildren(...projects.map(projectCard));
       renderPortfolio(portfolio);
       renderTrades(trades);
+      renderProposals(proposals);
       renderEvents(events);
       renderAudit(audit);
     } catch (error) {
@@ -200,6 +216,25 @@
       empty.textContent = '체결 내역이 없습니다.';
       tradeRoot.append(empty);
     }
+  }
+
+  function renderProposals(proposals) {
+    proposalRoot.replaceChildren(...proposals.map(proposal => {
+      const node = document.createElement('article');
+      node.className = 'entry';
+      const title = document.createElement('strong');
+      title.textContent = `${proposal.ticker} · ${proposal.rating} → ${proposal.suggested_paper_action.toUpperCase()}`;
+      const meta = document.createElement('div');
+      meta.className = 'muted';
+      meta.textContent = `${proposal.analysis_date} · 승인 ${proposal.approval_status} · 주문 생성 안 됨`;
+      const report = document.createElement('p');
+      report.style.margin = '8px 0 0';
+      report.style.whiteSpace = 'pre-wrap';
+      report.textContent = proposal.report || '보고서 내용이 없습니다.';
+      node.append(title, meta, report);
+      return node;
+    }));
+    if (!proposals.length) proposalRoot.innerHTML = '<span class="muted">분석 제안이 없습니다.</span>';
   }
 
   function renderEvents(events) {
@@ -267,6 +302,29 @@
       alert(error.message);
     } finally {
       submitButton.disabled = false;
+    }
+  };
+
+  document.querySelector('#analysis-date').value = new Date().toISOString().slice(0, 10);
+  researchForm.onsubmit = async event => {
+    event.preventDefault();
+    const submitButton = researchForm.querySelector('button');
+    submitButton.disabled = true;
+    submitButton.textContent = 'Agent 분석 중…';
+    try {
+      await api('/research/proposals', {
+        method: 'POST',
+        body: JSON.stringify({
+          ticker: document.querySelector('#research-ticker').value.trim(),
+          analysis_date: document.querySelector('#analysis-date').value
+        })
+      });
+      await refresh();
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      submitButton.disabled = false;
+      submitButton.textContent = '분석 실행';
     }
   };
 

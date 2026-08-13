@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "investment-town-backend"
-version = "0.3.0"
+version = "0.4.0"
 description = "Backend runtime for Investment Town multi-agent investment research and control plane."
 requires-python = ">=3.11"
 dependencies = [
@@ -14,6 +14,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+agents = [
+  "tradingagents @ git+https://github.com/TauricResearch/TradingAgents.git@a33fd4c0f134485a43553a2c23a63cb14adbd88f",
+]
 dev = [
   "httpx>=0.28,<1.0",
   "pytest>=8.0,<9.0",
@@ -22,6 +25,9 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/investment_town"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

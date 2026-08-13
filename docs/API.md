@@ -1,4 +1,4 @@
-# MVP 1.1 Control and Paper Trading API
+# MVP 1.2A Control, Agent Proposal, and Paper Trading API
 
 Base path: `/api/v1`
 
@@ -16,6 +16,8 @@ fail closed if `CONTROL_API_TOKEN` is missing.
 | `POST` | `/projects/{project_id}/commands/{command}` | Start, pause, resume, stop, or kill |
 | `GET` | `/events` | Durable recent events |
 | `GET` | `/audit` | Durable command audit entries |
+| `POST` | `/research/proposals` | Run TradingAgents and save a pending proposal |
+| `GET` | `/research/proposals` | List durable Agent proposals |
 | `GET` | `/paper/portfolio` | Paper cash, cost basis, realized P&L, and positions |
 | `GET` | `/paper/trades` | Durable paper trade history |
 | `POST` | `/paper/orders` | Immediately fill a manually priced paper order |
@@ -73,10 +75,27 @@ adds a `paper.order.filled` event. `book_value` is cash plus position cost basis
 1.1 has no market-data feed. These endpoints never call a brokerage or transmit a live order.
 
 Deferred beyond MVP 1.1: market prices, fees, taxes, fractional shares, partial fills,
-strategy automation, AI-generated orders, Toss Securities credentials, and live execution.
+strategy automation, Agent-approved orders, Toss Securities credentials, and live execution.
+
+## Agent research proposal
+
+The optional TradingAgents integration accepts a ticker and analysis date. A successful run
+stores a pending proposal containing the five-tier rating, suggested paper action, and final
+report. It never submits an order.
+
+```json
+{
+  "ticker": "NVDA",
+  "analysis_date": "2026-08-13"
+}
+```
+
+The endpoint returns HTTP `503` until the backend `agents` extra is installed and HTTP `502`
+when the configured LLM or market-data provider fails. Every saved proposal has
+`human_approval_required: true`, `approval_status: "pending"`, and `order_created: false`.
 
 ## MVP storage boundary
 
-MVP 1.1 uses SQLite and an in-process WebSocket fan-out. This is sufficient for one control
+MVP 1.2A uses SQLite and an in-process WebSocket fan-out. This is sufficient for one control
 API process. Move project, event, audit, paper account, position, and trade records to
 PostgreSQL and the fan-out to Redis Streams before running multiple API instances.
