@@ -15,8 +15,8 @@
     h1 { margin-bottom: 8px; font-size: clamp(1.5rem, 5vw, 2.25rem); }
     h2 { font-size: 1rem; color: #aebde4; }
     .toolbar { display: flex; gap: 8px; padding: 12px; margin-bottom: 16px; }
-    input, button { border: 1px solid #34436b; border-radius: 10px; padding: 10px 12px; font: inherit; }
-    input { min-width: 0; flex: 1; background: #0b1020; color: inherit; }
+    input, select, button { border: 1px solid #34436b; border-radius: 10px; padding: 10px 12px; font: inherit; }
+    input, select { min-width: 0; flex: 1; background: #0b1020; color: inherit; }
     button { background: #26365f; color: #fff; cursor: pointer; }
     button:hover { background: #334b86; }
     button.danger { background: #742c3a; }
@@ -32,14 +32,19 @@
     .entry { padding: 10px; border-radius: 10px; background: #0b1020; font-size: .86rem; }
     .muted { color: #8e9abc; }
     #connection { font-size: .85rem; }
-    @media (max-width: 520px) { .toolbar { flex-direction: column; } button { min-height: 44px; } }
+    .metrics { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 12px; }
+    .metric { padding: 12px; border-radius: 10px; background: #0b1020; }
+    .metric strong { display: block; margin-top: 4px; font-size: 1.05rem; }
+    .order-form { display: grid; grid-template-columns: 1.2fr .8fr .8fr 1fr auto; gap: 8px; }
+    .positive { color: #83efc4; } .negative { color: #ff9d9d; }
+    @media (max-width: 680px) { .toolbar, .order-form { grid-template-columns: 1fr; flex-direction: column; } button { min-height: 44px; } }
   </style>
 </head>
 <body>
 <main>
   <header>
     <h1>Investment Town</h1>
-    <p>모바일 AI 프로젝트 제어 센터 · MVP 1</p>
+    <p>모바일 AI 프로젝트 제어 센터 · MVP 1.1 Paper Trading</p>
     <span id="connection" class="muted">연결 대기</span>
   </header>
 
@@ -49,6 +54,27 @@
   </section>
 
   <section id="projects" class="grid"></section>
+
+  <section class="panel">
+    <h2>Paper 포트폴리오</h2>
+    <p class="muted">입력한 가격으로 즉시 모의 체결됩니다. 실제 주문은 전송되지 않습니다.</p>
+    <div id="portfolio" class="metrics"><span class="muted">포트폴리오를 불러오는 중입니다.</span></div>
+    <form id="paper-order" class="order-form">
+      <input id="ticker" autocomplete="off" maxlength="10" placeholder="Ticker (예: NVDA)" required>
+      <select id="side" aria-label="주문 방향">
+        <option value="buy">매수</option>
+        <option value="sell">매도</option>
+      </select>
+      <input id="quantity" type="number" min="1" step="1" placeholder="수량" required>
+      <input id="price" type="number" min="0.01" step="0.01" placeholder="체결 가격" required>
+      <button type="submit">Paper 주문</button>
+    </form>
+  </section>
+
+  <section class="panel">
+    <h2>Paper 체결 내역</h2>
+    <div id="trades" class="log"><span class="muted">체결 내역이 없습니다.</span></div>
+  </section>
 
   <section class="panel">
     <h2>실시간 이벤트</h2>
@@ -65,6 +91,9 @@
   const projectRoot = document.querySelector('#projects');
   const eventRoot = document.querySelector('#events');
   const auditRoot = document.querySelector('#audit');
+  const portfolioRoot = document.querySelector('#portfolio');
+  const tradeRoot = document.querySelector('#trades');
+  const orderForm = document.querySelector('#paper-order');
   const connection = document.querySelector('#connection');
   let socket;
 
@@ -100,10 +129,15 @@
 
   async function refresh() {
     try {
-      const [projects, events, audit] = await Promise.all([
-        api('/projects'), api('/events?limit=30'), api('/audit?limit=30')
+      const [projects, portfolio, trades, events, audit] = await Promise.all([
+        api('/projects'),
+        api('/paper/portfolio?project_id=investment-town'),
+        api('/paper/trades?project_id=investment-town&limit=30'),
+        api('/events?limit=30'), api('/audit?limit=30')
       ]);
       projectRoot.replaceChildren(...projects.map(projectCard));
+      renderPortfolio(portfolio);
+      renderTrades(trades);
       renderEvents(events);
       renderAudit(audit);
     } catch (error) {
@@ -122,11 +156,60 @@
     } catch (error) { alert(error.message); }
   }
 
+  const money = value => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(Number(value));
+
+  function renderPortfolio(portfolio) {
+    const values = [
+      ['가상 현금', portfolio.cash],
+      ['보유 원가', portfolio.positions_cost_basis],
+      ['장부가', portfolio.book_value],
+      ['실현 손익', portfolio.realized_pnl]
+    ];
+    const cards = values.map(([label, value]) => {
+      const card = document.createElement('div');
+      card.className = 'metric';
+      const caption = document.createElement('span');
+      caption.className = 'muted';
+      caption.textContent = label;
+      const amount = document.createElement('strong');
+      amount.textContent = money(value);
+      if (label === '실현 손익') amount.className = Number(value) >= 0 ? 'positive' : 'negative';
+      card.append(caption, amount);
+      return card;
+    });
+    const positions = document.createElement('div');
+    positions.className = 'entry';
+    positions.style.gridColumn = '1 / -1';
+    positions.textContent = portfolio.positions.length
+      ? portfolio.positions.map(position => `${position.ticker} ${position.quantity}주 · 평균 ${money(position.average_cost)}`).join(' / ')
+      : '보유 종목이 없습니다.';
+    portfolioRoot.replaceChildren(...cards, positions);
+  }
+
+  function renderTrades(trades) {
+    tradeRoot.replaceChildren(...trades.map(trade => {
+      const node = document.createElement('div');
+      node.className = 'entry';
+      const side = trade.side === 'buy' ? '매수' : '매도';
+      node.textContent = `${new Date(trade.created_at).toLocaleString()} · ${side} ${trade.ticker} ${trade.quantity}주 @ ${money(trade.price)} · 실현손익 ${money(trade.realized_pnl)}`;
+      return node;
+    }));
+    if (!trades.length) {
+      const empty = document.createElement('span');
+      empty.className = 'muted';
+      empty.textContent = '체결 내역이 없습니다.';
+      tradeRoot.append(empty);
+    }
+  }
+
   function renderEvents(events) {
     eventRoot.replaceChildren(...events.map(event => {
       const node = document.createElement('div');
       node.className = 'entry';
-      node.textContent = `${new Date(event.created_at).toLocaleString()} · ${event.event_type} · ${event.payload.from_state} → ${event.payload.to_state}`;
+      const detail = event.event_type === 'paper.order.filled'
+        ? `${event.payload.side.toUpperCase()} ${event.payload.quantity} ${event.payload.ticker} @ ${money(event.payload.price)}`
+        : `${event.payload.from_state} → ${event.payload.to_state}`;
+      node.textContent = `${new Date(event.created_at).toLocaleString()} · ${event.event_type} · ${detail}`;
       return node;
     }));
     if (!events.length) eventRoot.innerHTML = '<span class="muted">이벤트가 없습니다.</span>';
@@ -161,6 +244,31 @@
     };
     refresh();
   }
+
+  orderForm.onsubmit = async event => {
+    event.preventDefault();
+    const submitButton = orderForm.querySelector('button');
+    submitButton.disabled = true;
+    try {
+      await api('/paper/orders', {
+        method: 'POST',
+        body: JSON.stringify({
+          project_id: 'investment-town',
+          ticker: document.querySelector('#ticker').value.trim(),
+          side: document.querySelector('#side').value,
+          quantity: Number(document.querySelector('#quantity').value),
+          price: Number(document.querySelector('#price').value),
+          reason: 'dashboard paper order'
+        })
+      });
+      orderForm.reset();
+      await refresh();
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      submitButton.disabled = false;
+    }
+  };
 
   document.querySelector('#connect').onclick = connect;
   connect();

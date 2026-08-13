@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.responses import FileResponse
 
 from investment_town.api.router import router
+from investment_town.broker.paper import PaperStore
 from investment_town.control import ProjectControl, ProjectStore
 from investment_town.core.config import Settings, settings
 
@@ -17,14 +18,16 @@ def create_app(app_settings: Settings = settings) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         store = ProjectStore(app_settings.database_path)
         store.register("investment-town", "Investment Town")
+        paper = PaperStore(app_settings.database_path)
         app.state.settings = app_settings
-        app.state.control = ProjectControl(store)
+        app.state.control = ProjectControl(store, paper)
         yield
+        paper.close()
         store.close()
 
     application = FastAPI(
         title="Investment Town API",
-        version="0.2.0",
+        version="0.3.0",
         description="Control plane and multi-agent investment research backend.",
         lifespan=lifespan,
     )
