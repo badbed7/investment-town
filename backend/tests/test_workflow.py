@@ -37,6 +37,9 @@ def test_invalid_transition_and_token_auth(tmp_path: Path) -> None:
     )
     with TestClient(app) as client:
         assert client.get("/api/v1/projects").status_code == 401
+        assert client.get(
+            "/api/v1/paper/portfolio", params={"project_id": "investment-town"}
+        ).status_code == 401
         headers = {"Authorization": "Bearer secret-token"}
         assert client.post(
             "/api/v1/projects/investment-town/commands/start", json={}, headers=headers
@@ -68,3 +71,52 @@ def test_websocket_receives_status_event(tmp_path: Path) -> None:
         event = websocket.receive_json()
         assert event["event_type"] == "project.status_changed"
         assert event["payload"]["to_state"] == "running"
+
+
+def test_paper_buy_sell_and_persistence(tmp_path: Path) -> None:
+    database = tmp_path / "control.db"
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        assert client.get(
+            "/api/v1/paper/portfolio", params={"project_id": "investment-town"}
+        ).json()["cash"] == "100000"
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        buy = client.post(
+            "/api/v1/paper/orders",
+            json={"ticker": "nvda", "side": "buy", "quantity": 10, "price": "100.00"},
+        )
+        assert buy.status_code == 200
+        assert buy.json()["portfolio"]["cash"] == "99000"
+        assert buy.json()["portfolio"]["positions"][0]["ticker"] == "NVDA"
+        sell = client.post(
+            "/api/v1/paper/orders",
+            json={"ticker": "NVDA", "side": "sell", "quantity": 4, "price": "125.00"},
+        )
+        assert sell.status_code == 200
+        assert sell.json()["portfolio"]["realized_pnl"] == "100"
+        assert sell.json()["portfolio"]["positions"][0]["quantity"] == 6
+        assert client.get("/api/v1/events").json()[0]["event_type"] == "paper.order.filled"
+
+    reopened = create_app(Settings(database_path=str(database)))
+    with TestClient(reopened) as client:
+        portfolio = client.get(
+            "/api/v1/paper/portfolio", params={"project_id": "investment-town"}
+        ).json()
+        assert portfolio["cash"] == "99500"
+        assert portfolio["positions"][0]["quantity"] == 6
+        trades = client.get(
+            "/api/v1/paper/trades", params={"project_id": "investment-town"}
+        ).json()
+        assert len(trades) == 2
+
+
+def test_paper_order_requires_running_project_and_balance(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        order = {"ticker": "NVDA", "side": "buy", "quantity": 1, "price": "100.00"}
+        assert client.post("/api/v1/paper/orders", json=order).status_code == 409
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        order["quantity"] = 1001
+        assert client.post("/api/v1/paper/orders", json=order).status_code == 409
+        sell = {"ticker": "NVDA", "side": "sell", "quantity": 1, "price": "100.00"}
+        assert client.post("/api/v1/paper/orders", json=sell).status_code == 409

@@ -15,6 +15,13 @@ from fastapi import (
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from investment_town.agents.registry import AGENT_ROLES
+from investment_town.broker.paper import (
+    InvalidPaperOrder,
+    PaperOrderRequest,
+    PaperOrderResult,
+    PaperPortfolio,
+    PaperTrade,
+)
 from investment_town.control import InvalidTransition, ProjectControl
 from investment_town.core.config import Settings
 from investment_town.schemas.commands import ProjectCommand, ProjectCommandName
@@ -180,3 +187,42 @@ async def event_stream(websocket: WebSocket) -> None:
         pass
     finally:
         control.events.unsubscribe(queue)
+
+
+@router.get("/paper/portfolio", response_model=PaperPortfolio)
+def paper_portfolio(
+    project_id: str,
+    _: Actor,
+    control: Control,
+) -> PaperPortfolio:
+    try:
+        return control.paper.get_portfolio(project_id)
+    except KeyError as error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found") from error
+
+
+@router.get("/paper/trades", response_model=list[PaperTrade])
+def paper_trades(
+    project_id: str,
+    _: Actor,
+    control: Control,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+) -> list[PaperTrade]:
+    try:
+        return control.paper.list_trades(project_id, limit)
+    except KeyError as error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found") from error
+
+
+@router.post("/paper/orders", response_model=PaperOrderResult)
+async def paper_order(
+    body: PaperOrderRequest,
+    _: Actor,
+    control: Control,
+) -> PaperOrderResult:
+    try:
+        return await control.paper_order(body)
+    except KeyError as error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found") from error
+    except InvalidPaperOrder as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error

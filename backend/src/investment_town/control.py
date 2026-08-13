@@ -7,6 +7,7 @@ from pathlib import Path
 from threading import RLock
 from uuid import uuid4
 
+from investment_town.broker.paper import PaperOrderRequest, PaperOrderResult, PaperStore
 from investment_town.schemas.commands import ProjectCommandName
 from investment_town.schemas.control import (
     AuditEntry,
@@ -247,8 +248,9 @@ class EventHub:
 
 
 class ProjectControl:
-    def __init__(self, store: ProjectStore) -> None:
+    def __init__(self, store: ProjectStore, paper: PaperStore) -> None:
         self.store = store
+        self.paper = paper
         self.events = EventHub()
 
     async def command(
@@ -259,5 +261,10 @@ class ProjectControl:
         reason: str | None,
     ) -> CommandResult:
         result = self.store.apply_command(project_id, command, actor, reason)
+        self.events.publish(result.event)
+        return result
+
+    async def paper_order(self, order: PaperOrderRequest) -> PaperOrderResult:
+        result = self.paper.submit(order)
         self.events.publish(result.event)
         return result
