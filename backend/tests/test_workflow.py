@@ -1,11 +1,13 @@
 import sqlite3
 from datetime import date
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from investment_town.core.config import Settings
 from investment_town.integrations.trading_agents import (
+    AgentResearchOutput,
     TradingAgentsUnavailable,
     TradingAnalysisResult,
     TradingProposal,
@@ -63,6 +65,16 @@ def test_trading_agents_state_is_normalized_for_the_blackboard() -> None:
                     },
                     "risk_debate_state": {"judge_decision": "Risk is acceptable."},
                     "final_trade_decision": "Final portfolio decision.",
+                    "agent_metadata": {
+                        "news": {
+                            "evidence_ids": ["source-1"],
+                            "confidence": 0.75,
+                            "model": "research-model",
+                            "prompt_tokens": 12,
+                            "completion_tokens": 4,
+                            "estimated_cost": "0.0002",
+                        }
+                    },
                 },
                 "Buy",
             )
@@ -72,10 +84,13 @@ def test_trading_agents_state_is_normalized_for_the_blackboard() -> None:
     )
 
     assert result.proposal.rating == "Buy"
-    assert result.agent_outputs["news"] == "Material product announcement."
-    assert result.agent_outputs["bull"] == "Bull case."
-    assert result.agent_outputs["risk"] == "Risk is acceptable."
-    assert result.agent_outputs["portfolio_manager"] == "Final portfolio decision."
+    assert result.agent_outputs["news"].content == "Material product announcement."
+    assert result.agent_outputs["news"].evidence_ids == ["source-1"]
+    assert result.agent_outputs["news"].confidence == 0.75
+    assert result.agent_outputs["news"].prompt_tokens == 12
+    assert result.agent_outputs["bull"].content == "Bull case."
+    assert result.agent_outputs["risk"].content == "Risk is acceptable."
+    assert result.agent_outputs["portfolio_manager"].content == "Final portfolio decision."
 
 
 def test_research_proposal_api_persists(tmp_path: Path, monkeypatch) -> None:
@@ -301,6 +316,72 @@ def test_existing_proposal_database_is_migrated_in_place(tmp_path: Path) -> None
         assert restored["trade_id"] is None
 
 
+def test_existing_research_run_database_is_migrated_in_place(tmp_path: Path) -> None:
+    database = tmp_path / "control.db"
+    run_id = str(uuid4())
+    task_id = str(uuid4())
+    connection = sqlite3.connect(database)
+    with connection:
+        connection.executescript(
+            """
+            CREATE TABLE research_runs (
+                run_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                analysis_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_stage INTEGER NOT NULL,
+                final_rating TEXT,
+                proposal_id TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE TABLE research_agent_tasks (
+                task_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                stage INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                UNIQUE(run_id, agent_id)
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research_runs VALUES (
+                ?, 'investment-town', 'NVDA', '2026-08-19', 'completed', 3,
+                'Hold', NULL, NULL, '2026-08-19T00:00:00+00:00',
+                '2026-08-19T00:01:00+00:00', '2026-08-19T00:01:00+00:00'
+            )
+            """,
+            (run_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO research_agent_tasks VALUES (
+                ?, ?, 'news', 0, 'completed', 'Legacy result',
+                '2026-08-19T00:00:00+00:00', '2026-08-19T00:00:10+00:00'
+            )
+            """,
+            (task_id, run_id),
+        )
+    connection.close()
+
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        detail = client.get(f"/api/v1/research/runs/{run_id}").json()
+        assert detail["run"]["attempt"] == 1
+        assert detail["run"]["prompt_tokens"] == 0
+        assert detail["run"]["estimated_cost"] == "0"
+        assert detail["tasks"][0]["evidence_ids"] == []
+        assert detail["checkpoints"] == []
+
+
 def test_durable_research_run_records_agent_tasks_and_blackboard(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -317,14 +398,28 @@ def test_durable_research_run_records_agent_tasks_and_blackboard(
         return TradingAnalysisResult(
             proposal=proposal,
             agent_outputs={
-                "news": "News result.",
-                "fundamental": "Fundamental result.",
-                "macro": "Macro result.",
-                "quant": "Quant result.",
-                "bull": "Bull result.",
-                "bear": "Bear result.",
-                "risk": "Risk result.",
-                "portfolio_manager": "Portfolio conclusion.",
+                "news": AgentResearchOutput(
+                    content="News result.",
+                    evidence_ids=["news-1", "filing-2"],
+                    confidence=0.82,
+                    model="research-model",
+                    prompt_tokens=100,
+                    completion_tokens=20,
+                    estimated_cost="0.001",
+                ),
+                "fundamental": AgentResearchOutput(content="Fundamental result."),
+                "macro": AgentResearchOutput(content="Macro result."),
+                "quant": AgentResearchOutput(content="Quant result."),
+                "bull": AgentResearchOutput(content="Bull result."),
+                "bear": AgentResearchOutput(content="Bear result."),
+                "risk": AgentResearchOutput(content="Risk result."),
+                "portfolio_manager": AgentResearchOutput(
+                    content="Portfolio conclusion.",
+                    model="reasoning-model",
+                    prompt_tokens=50,
+                    completion_tokens=10,
+                    estimated_cost="0.002",
+                ),
             },
         )
 
@@ -349,6 +444,20 @@ def test_durable_research_run_records_agent_tasks_and_blackboard(
         assert len(detail["tasks"]) == 8
         assert {task["status"] for task in detail["tasks"]} == {"completed"}
         assert len(detail["blackboard"]) == 8
+        assert len(detail["checkpoints"]) == 4
+        assert {checkpoint["stage"] for checkpoint in detail["checkpoints"]} == {
+            0,
+            1,
+            2,
+            3,
+        }
+        assert len(detail["usage"]) == 2
+        assert detail["run"]["prompt_tokens"] == 150
+        assert detail["run"]["completion_tokens"] == 30
+        assert detail["run"]["estimated_cost"] == "0.003"
+        news_task = next(task for task in detail["tasks"] if task["agent_id"] == "news")
+        assert news_task["confidence"] == 0.82
+        assert news_task["evidence_ids"] == ["news-1", "filing-2"]
         assert {entry["agent_id"] for entry in detail["blackboard"]} == {
             "news",
             "fundamental",
@@ -431,12 +540,137 @@ def test_project_kill_fails_active_research_run(tmp_path: Path) -> None:
         assert client.get("/api/v1/research/proposals").json() == []
 
 
+def test_project_pause_checkpoints_active_research_run(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+
+        paused = client.post(
+            "/api/v1/projects/investment-town/commands/pause",
+            json={"reason": "operator review"},
+        )
+        assert paused.status_code == 200
+        detail = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert detail["run"]["status"] == "paused"
+        assert detail["checkpoints"][-1]["state"] == "paused"
+
+        client.post("/api/v1/projects/investment-town/commands/resume", json={})
+        still_paused = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert still_paused["run"]["status"] == "paused"
+
+        client.post("/api/v1/projects/investment-town/commands/kill", json={})
+        killed = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert killed["run"]["status"] == "failed"
+
+
+def test_research_run_resumes_from_saved_stage_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def should_not_rerun_provider(ticker: str, analysis_date: date) -> TradingAnalysisResult:
+        raise AssertionError("resume must use the durable analysis snapshot")
+
+    monkeypatch.setattr(
+        "investment_town.control.run_trading_agents_analysis", should_not_rerun_provider
+    )
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    analysis = TradingAnalysisResult(
+        proposal=TradingProposal(
+            ticker="NVDA",
+            analysis_date=date(2026, 8, 19),
+            rating="Hold",
+            suggested_paper_action="hold",
+            report="Checkpoint result.",
+        ),
+        agent_outputs={
+            agent_id: AgentResearchOutput(content=f"{agent_id} result")
+            for agent_id in (
+                "news",
+                "fundamental",
+                "macro",
+                "quant",
+                "bull",
+                "bear",
+                "risk",
+                "portfolio_manager",
+            )
+        },
+    )
+
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+        client.app.state.control.store.save_research_analysis_snapshot(
+            str(run.run_id), analysis
+        )
+        detail, _, completed = client.app.state.control.store.process_next_research_stage(
+            str(run.run_id)
+        )
+        assert completed is False
+        assert detail.run.current_stage == 1
+
+        paused = client.post(f"/api/v1/research/runs/{run.run_id}/pause")
+        assert paused.status_code == 200
+        assert paused.json()["run"]["status"] == "paused"
+        assert paused.json()["checkpoints"][-1]["state"] == "paused"
+
+        resumed = client.post(f"/api/v1/research/runs/{run.run_id}/resume")
+        assert resumed.status_code == 200
+        restored = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert restored["run"]["status"] == "completed"
+        completed_checkpoints = [
+            item for item in restored["checkpoints"] if item["state"] == "completed"
+        ]
+        assert [item["stage"] for item in completed_checkpoints] == [0, 1, 2, 3]
+
+
+def test_failed_research_run_can_retry(tmp_path: Path, monkeypatch) -> None:
+    def successful_retry(ticker: str, analysis_date: date) -> TradingAnalysisResult:
+        return TradingAnalysisResult(
+            proposal=TradingProposal(
+                ticker=ticker,
+                analysis_date=analysis_date,
+                rating="Hold",
+                suggested_paper_action="hold",
+                report="Retry completed.",
+            ),
+            agent_outputs={
+                "portfolio_manager": AgentResearchOutput(content="Retry completed.")
+            },
+        )
+
+    monkeypatch.setattr(
+        "investment_town.control.run_trading_agents_analysis", successful_retry
+    )
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+        client.app.state.control.store.fail_research_run(
+            str(run.run_id), "temporary provider failure"
+        )
+
+        retried = client.post(f"/api/v1/research/runs/{run.run_id}/retry")
+        assert retried.status_code == 200
+        restored = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert restored["run"]["status"] == "completed"
+        assert restored["run"]["attempt"] == 2
+        assert all(task["attempt"] == 2 for task in restored["tasks"])
+        assert len(client.get("/api/v1/research/proposals").json()) == 1
+
+
 def test_dashboard_exposes_agent_proposal_form(tmp_path: Path) -> None:
     app = create_app(Settings(database_path=str(tmp_path / "control.db")))
     with TestClient(app) as client:
         response = client.get("/")
         assert response.status_code == 200
-        assert "MVP 2A Durable Research Runs" in response.text
+        assert "MVP 2B Checkpointed Orchestrator" in response.text
         assert 'id="research-form"' in response.text
         assert 'id="research-runs"' in response.text
 

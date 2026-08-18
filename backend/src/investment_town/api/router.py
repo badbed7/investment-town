@@ -167,6 +167,52 @@ def research_run(run_id: str, _: Actor, control: Control) -> ResearchRunDetail:
     return detail
 
 
+def _change_research_run(
+    control: ProjectControl,
+    run_id: str,
+    action: str,
+) -> ResearchRunDetail:
+    try:
+        if action == "pause":
+            return control.pause_research_run(run_id)
+        if action == "resume":
+            return control.resume_research_run(run_id)
+        return control.retry_research_run(run_id)
+    except KeyError as error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "research run not found") from error
+    except InvalidResearchRun as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+
+
+@router.post("/research/runs/{run_id}/pause", response_model=ResearchRunDetail)
+def pause_research_run(run_id: str, _: Actor, control: Control) -> ResearchRunDetail:
+    return _change_research_run(control, run_id, "pause")
+
+
+@router.post("/research/runs/{run_id}/resume", response_model=ResearchRunDetail)
+async def resume_research_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    _: Actor,
+    control: Control,
+) -> ResearchRunDetail:
+    detail = _change_research_run(control, run_id, "resume")
+    background_tasks.add_task(control.execute_research_run, run_id)
+    return detail
+
+
+@router.post("/research/runs/{run_id}/retry", response_model=ResearchRunDetail)
+async def retry_research_run(
+    run_id: str,
+    background_tasks: BackgroundTasks,
+    _: Actor,
+    control: Control,
+) -> ResearchRunDetail:
+    detail = _change_research_run(control, run_id, "retry")
+    background_tasks.add_task(control.execute_research_run, run_id)
+    return detail
+
+
 @router.get("/research/proposals", response_model=list[TradingProposal])
 def research_proposals(
     _: Actor,

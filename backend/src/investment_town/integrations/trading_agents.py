@@ -1,4 +1,3 @@
-from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol
@@ -25,10 +24,19 @@ class TradingGraphRunner(Protocol):
     ) -> tuple[dict[str, Any], str]: ...
 
 
-@dataclass(frozen=True, slots=True)
-class TradingAnalysisResult:
+class AgentResearchOutput(BaseModel):
+    content: str
+    evidence_ids: list[str] = Field(default_factory=list)
+    confidence: float | None = Field(default=None, ge=0, le=1)
+    model: str | None = None
+    prompt_tokens: int = Field(default=0, ge=0)
+    completion_tokens: int = Field(default=0, ge=0)
+    estimated_cost: Decimal = Field(default=Decimal(0), ge=0)
+
+
+class TradingAnalysisResult(BaseModel):
     proposal: "TradingProposal"
-    agent_outputs: dict[str, str]
+    agent_outputs: dict[str, AgentResearchOutput]
 
 
 class ResearchAnalysisRequest(BaseModel):
@@ -91,7 +99,7 @@ def _nested_text(state: dict[str, Any], *path: str) -> str:
     return _as_text(value)
 
 
-def _agent_outputs(state: dict[str, Any]) -> dict[str, str]:
+def _agent_outputs(state: dict[str, Any]) -> dict[str, AgentResearchOutput]:
     candidates: dict[str, tuple[tuple[str, ...], ...]] = {
         "news": (("news_report",),),
         "fundamental": (("fundamentals_report",), ("fundamental_report",)),
@@ -114,10 +122,31 @@ def _agent_outputs(state: dict[str, Any]) -> dict[str, str]:
             ("trader_investment_plan",),
         ),
     }
-    outputs: dict[str, str] = {}
+    metadata = state.get("agent_metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    outputs: dict[str, AgentResearchOutput] = {}
     for agent_id, paths in candidates.items():
-        outputs[agent_id] = next(
+        content = next(
             (text for path in paths if (text := _nested_text(state, *path))), ""
+        )
+        raw_metadata = metadata.get(agent_id)
+        if not isinstance(raw_metadata, dict):
+            raw_metadata = {}
+        raw_evidence = raw_metadata.get("evidence_ids", [])
+        evidence_ids = (
+            [str(item) for item in raw_evidence]
+            if isinstance(raw_evidence, list)
+            else []
+        )
+        outputs[agent_id] = AgentResearchOutput(
+            content=content,
+            evidence_ids=evidence_ids,
+            confidence=raw_metadata.get("confidence"),
+            model=_as_text(raw_metadata.get("model")) or None,
+            prompt_tokens=raw_metadata.get("prompt_tokens", 0),
+            completion_tokens=raw_metadata.get("completion_tokens", 0),
+            estimated_cost=raw_metadata.get("estimated_cost", "0"),
         )
     return outputs
 
