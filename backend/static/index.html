@@ -37,7 +37,7 @@
     .metric strong { display: block; margin-top: 4px; font-size: 1.05rem; }
     .research-form { display: grid; grid-template-columns: 1.2fr 1fr auto; gap: 8px; margin-bottom: 12px; }
     .order-form { display: grid; grid-template-columns: 1.2fr .8fr .8fr 1fr auto; gap: 8px; }
-    .positive { color: #83efc4; } .negative { color: #ff9d9d; }
+    .positive, .approved { color: #83efc4; } .negative, .rejected { color: #ff9d9d; }
     @media (max-width: 680px) { .toolbar, .research-form, .order-form { grid-template-columns: 1fr; flex-direction: column; } button { min-height: 44px; } }
   </style>
 </head>
@@ -45,7 +45,7 @@
 <main>
   <header>
     <h1>Investment Town</h1>
-    <p>모바일 AI 프로젝트 제어 센터 · MVP 1.2A Agent Proposal</p>
+    <p>모바일 AI 프로젝트 제어 센터 · MVP 2B Checkpointed Orchestrator</p>
     <span id="connection" class="muted">연결 대기</span>
   </header>
 
@@ -57,13 +57,19 @@
   <section id="projects" class="grid"></section>
 
   <section class="panel">
-    <h2>Agent 분석 제안</h2>
-    <p class="muted">TradingAgents가 분석 제안만 생성합니다. 주문은 생성되지 않으며 LLM API 비용이 발생할 수 있습니다.</p>
+    <h2>멀티 Agent 리서치 실행</h2>
+    <p class="muted">실행 단계와 Agent 결과는 영속 저장되며 실제 결과만 공유 Blackboard에 기록됩니다. 프로젝트를 먼저 시작해야 합니다.</p>
     <form id="research-form" class="research-form">
       <input id="research-ticker" autocomplete="off" maxlength="12" placeholder="Ticker (예: NVDA)" required>
       <input id="analysis-date" type="date" aria-label="분석 기준일" required>
       <button type="submit">분석 실행</button>
     </form>
+    <div id="research-runs" class="log"><span class="muted">리서치 실행이 없습니다.</span></div>
+  </section>
+
+  <section class="panel">
+    <h2>Agent 제안 승인 큐</h2>
+    <p class="muted">완료된 Run의 제안은 사용자가 승인하고 수량·가격을 입력한 경우에만 Paper 주문을 생성합니다.</p>
     <div id="research-proposals" class="log"><span class="muted">분석 제안이 없습니다.</span></div>
   </section>
 
@@ -105,6 +111,7 @@
   const auditRoot = document.querySelector('#audit');
   const portfolioRoot = document.querySelector('#portfolio');
   const tradeRoot = document.querySelector('#trades');
+  const runRoot = document.querySelector('#research-runs');
   const proposalRoot = document.querySelector('#research-proposals');
   const researchForm = document.querySelector('#research-form');
   const orderForm = document.querySelector('#paper-order');
@@ -143,16 +150,18 @@
 
   async function refresh() {
     try {
-      const [projects, portfolio, trades, proposals, events, audit] = await Promise.all([
+      const [projects, portfolio, trades, runs, proposals, events, audit] = await Promise.all([
         api('/projects'),
         api('/paper/portfolio?project_id=investment-town'),
         api('/paper/trades?project_id=investment-town&limit=30'),
+        api('/research/runs?limit=10'),
         api('/research/proposals?limit=10'),
         api('/events?limit=30'), api('/audit?limit=30')
       ]);
       projectRoot.replaceChildren(...projects.map(projectCard));
       renderPortfolio(portfolio);
       renderTrades(trades);
+      renderRuns(runs);
       renderProposals(proposals);
       renderEvents(events);
       renderAudit(audit);
@@ -225,25 +234,171 @@
       const title = document.createElement('strong');
       title.textContent = `${proposal.ticker} · ${proposal.rating} → ${proposal.suggested_paper_action.toUpperCase()}`;
       const meta = document.createElement('div');
-      meta.className = 'muted';
-      meta.textContent = `${proposal.analysis_date} · 승인 ${proposal.approval_status} · 주문 생성 안 됨`;
+      meta.className = proposal.approval_status === 'pending' ? 'muted' : proposal.approval_status;
+      meta.textContent = `${proposal.analysis_date} · ${proposal.approval_status.toUpperCase()} · ${proposal.order_created ? 'Paper 주문 생성됨' : '주문 없음'}`;
       const report = document.createElement('p');
       report.style.margin = '8px 0 0';
       report.style.whiteSpace = 'pre-wrap';
       report.textContent = proposal.report || '보고서 내용이 없습니다.';
       node.append(title, meta, report);
+      if (proposal.approval_status === 'pending') {
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+        const approve = document.createElement('button');
+        approve.textContent = '승인';
+        approve.onclick = () => decideProposal(proposal, true);
+        const reject = document.createElement('button');
+        reject.textContent = '거절';
+        reject.className = 'danger';
+        reject.onclick = () => decideProposal(proposal, false);
+        actions.append(approve, reject);
+        node.append(actions);
+      }
       return node;
     }));
     if (!proposals.length) proposalRoot.innerHTML = '<span class="muted">분석 제안이 없습니다.</span>';
+  }
+
+  function renderRuns(runs) {
+    runRoot.replaceChildren(...runs.map(run => {
+      const node = document.createElement('article');
+      node.className = 'entry';
+      const title = document.createElement('strong');
+      title.textContent = `${run.ticker} · ${run.status.toUpperCase()}${run.final_rating ? ` · ${run.final_rating}` : ''}`;
+      const meta = document.createElement('div');
+      meta.className = run.status === 'completed' ? 'approved' : run.status === 'failed' ? 'rejected' : 'muted';
+      meta.textContent = `${new Date(run.created_at).toLocaleString()} · stage ${run.current_stage + 1}/4 · attempt ${run.attempt} · ${run.prompt_tokens + run.completion_tokens} tokens · $${Number(run.estimated_cost).toFixed(4)}${run.error ? ` · ${run.error}` : ''}`;
+      const details = document.createElement('div');
+      const actions = document.createElement('div');
+      actions.className = 'actions';
+      const inspect = document.createElement('button');
+      inspect.textContent = '체크포인트 / Blackboard';
+      inspect.onclick = () => loadRunDetail(run.run_id, details, inspect);
+      actions.append(inspect);
+      const controlAction = run.status === 'running' ? 'pause' : run.status === 'paused' ? 'resume' : run.status === 'failed' ? 'retry' : null;
+      if (controlAction) {
+        const control = document.createElement('button');
+        control.textContent = controlAction;
+        control.onclick = () => controlResearchRun(run.run_id, controlAction, control);
+        actions.append(control);
+      }
+      node.append(title, meta, actions, details);
+      return node;
+    }));
+    if (!runs.length) runRoot.innerHTML = '<span class="muted">리서치 실행이 없습니다.</span>';
+  }
+
+  async function controlResearchRun(runId, action, button) {
+    button.disabled = true;
+    try {
+      await api(`/research/runs/${runId}/${action}`, { method: 'POST', body: '{}' });
+      await refresh();
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function loadRunDetail(runId, root, button) {
+    button.disabled = true;
+    try {
+      const detail = await api(`/research/runs/${runId}`);
+      root.replaceChildren();
+      const timeline = document.createElement('div');
+      timeline.className = 'log';
+      timeline.style.marginTop = '8px';
+      for (const task of detail.tasks) {
+        const row = document.createElement('div');
+        row.className = 'entry';
+        const confidence = task.confidence === null ? '신뢰도 미제공' : `신뢰도 ${(task.confidence * 100).toFixed(0)}%`;
+        row.textContent = `Stage ${task.stage + 1} · ${task.agent_id} · ${task.status} · attempt ${task.attempt} · ${confidence} · 근거 ${task.evidence_ids.length}건 · ${task.summary || '결과 없음'}`;
+        timeline.append(row);
+      }
+      const checkpointTitle = document.createElement('strong');
+      checkpointTitle.textContent = `Checkpoints ${detail.checkpoints.length}건`;
+      checkpointTitle.style.display = 'block';
+      checkpointTitle.style.marginTop = '12px';
+      const checkpointLog = document.createElement('div');
+      checkpointLog.className = 'log';
+      for (const checkpoint of detail.checkpoints) {
+        const checkpointRow = document.createElement('div');
+        checkpointRow.className = 'entry';
+        checkpointRow.textContent = `${new Date(checkpoint.created_at).toLocaleString()} · Stage ${checkpoint.stage + 1} · ${checkpoint.state} · ${checkpoint.completed_agents.join(', ') || '완료 Agent 없음'}`;
+        checkpointLog.append(checkpointRow);
+      }
+      const usageSummary = document.createElement('div');
+      usageSummary.className = 'entry';
+      usageSummary.style.marginTop = '8px';
+      usageSummary.textContent = detail.usage.length
+        ? `모델 사용량 · ${detail.usage.reduce((sum, item) => sum + item.prompt_tokens + item.completion_tokens, 0)} tokens · $${detail.usage.reduce((sum, item) => sum + Number(item.estimated_cost), 0).toFixed(4)}`
+        : '모델 사용량 메타데이터가 제공되지 않았습니다.';
+      const blackboardTitle = document.createElement('strong');
+      blackboardTitle.textContent = `Blackboard ${detail.blackboard.length}건`;
+      blackboardTitle.style.display = 'block';
+      blackboardTitle.style.marginTop = '12px';
+      root.append(timeline, checkpointTitle, checkpointLog, usageSummary, blackboardTitle);
+      for (const entry of detail.blackboard) {
+        const item = document.createElement('details');
+        item.className = 'entry';
+        item.style.marginTop = '8px';
+        const summary = document.createElement('summary');
+        summary.textContent = `${entry.agent_id} · ${entry.topic}`;
+        const content = document.createElement('p');
+        content.style.whiteSpace = 'pre-wrap';
+        content.textContent = entry.content;
+        item.append(summary, content);
+        root.append(item);
+      }
+    } catch (error) {
+      alert(error.message);
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function decideProposal(proposal, approve) {
+    let body = {};
+    if (approve && proposal.suggested_paper_action !== 'hold') {
+      const quantity = prompt(`${proposal.ticker} Paper ${proposal.suggested_paper_action.toUpperCase()} 수량`);
+      if (quantity === null) return;
+      const price = prompt(`${proposal.ticker} Paper 체결 가격 (USD)`);
+      if (price === null) return;
+      if (!Number.isInteger(Number(quantity)) || Number(quantity) <= 0 || Number(price) <= 0) {
+        alert('수량은 양의 정수, 가격은 0보다 큰 숫자여야 합니다.');
+        return;
+      }
+      body = { quantity: Number(quantity), price: Number(price) };
+    }
+    const reason = prompt(approve ? '승인 사유 (선택)' : '거절 사유 (선택)');
+    if (reason === null) return;
+    body.reason = reason || null;
+    try {
+      await api(`/research/proposals/${proposal.proposal_id}/${approve ? 'approve' : 'reject'}`, {
+        method: 'POST', body: JSON.stringify(body)
+      });
+      await refresh();
+    } catch (error) { alert(error.message); }
   }
 
   function renderEvents(events) {
     eventRoot.replaceChildren(...events.map(event => {
       const node = document.createElement('div');
       node.className = 'entry';
-      const detail = event.event_type === 'paper.order.filled'
-        ? `${event.payload.side.toUpperCase()} ${event.payload.quantity} ${event.payload.ticker} @ ${money(event.payload.price)}`
-        : `${event.payload.from_state} → ${event.payload.to_state}`;
+      let detail;
+      if (event.event_type === 'paper.order.filled') {
+        detail = `${event.payload.side.toUpperCase()} ${event.payload.quantity} ${event.payload.ticker} @ ${money(event.payload.price)}`;
+      } else if (event.event_type.startsWith('research.proposal.')) {
+        detail = `${event.payload.ticker} · ${event.payload.approval_status.toUpperCase()}${event.payload.order_created ? ' · Paper 주문 생성' : ''}`;
+      } else if (event.event_type === 'research.agent.finished') {
+        detail = `${event.payload.ticker} · Stage ${event.payload.stage + 1} · ${event.payload.agent_id} · ${event.payload.status}`;
+      } else if (event.event_type === 'research.checkpoint.saved') {
+        detail = `${event.payload.ticker} · Stage ${event.payload.stage + 1} · CHECKPOINT`;
+      } else if (event.event_type.startsWith('research.run.')) {
+        detail = `${event.payload.ticker} · ${event.payload.status.toUpperCase()}${event.payload.rating ? ` · ${event.payload.rating}` : ''}`;
+      } else {
+        detail = `${event.payload.from_state} → ${event.payload.to_state}`;
+      }
       node.textContent = `${new Date(event.created_at).toLocaleString()} · ${event.event_type} · ${detail}`;
       return node;
     }));
@@ -312,7 +467,7 @@
     submitButton.disabled = true;
     submitButton.textContent = 'Agent 분석 중…';
     try {
-      await api('/research/proposals', {
+      await api('/research/runs', {
         method: 'POST',
         body: JSON.stringify({
           ticker: document.querySelector('#research-ticker').value.trim(),

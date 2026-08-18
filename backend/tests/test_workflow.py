@@ -1,13 +1,18 @@
+import sqlite3
 from datetime import date
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
 from investment_town.core.config import Settings
 from investment_town.integrations.trading_agents import (
+    AgentResearchOutput,
     TradingAgentsUnavailable,
+    TradingAnalysisResult,
     TradingProposal,
     analyze_with_trading_agents,
+    run_trading_agents_analysis,
 )
 from investment_town.main import create_app
 from investment_town.workflows.research import research_workflow_outline
@@ -41,6 +46,51 @@ def test_trading_agents_result_is_a_proposal_only() -> None:
     assert proposal.human_approval_required is True
     assert proposal.approval_status == "pending"
     assert proposal.order_created is False
+
+
+def test_trading_agents_state_is_normalized_for_the_blackboard() -> None:
+    class FakeResearchGraph:
+        def propagate(
+            self, company_name: str, trade_date: str, asset_type: str = "stock"
+        ) -> tuple[dict[str, object], str]:
+            return (
+                {
+                    "news_report": "Material product announcement.",
+                    "fundamentals_report": "Revenue growth remains strong.",
+                    "sentiment_report": "Risk appetite is neutral.",
+                    "market_report": "Momentum is positive.",
+                    "investment_debate_state": {
+                        "bull_history": "Bull case.",
+                        "bear_history": "Bear case.",
+                    },
+                    "risk_debate_state": {"judge_decision": "Risk is acceptable."},
+                    "final_trade_decision": "Final portfolio decision.",
+                    "agent_metadata": {
+                        "news": {
+                            "evidence_ids": ["source-1"],
+                            "confidence": 0.75,
+                            "model": "research-model",
+                            "prompt_tokens": 12,
+                            "completion_tokens": 4,
+                            "estimated_cost": "0.0002",
+                        }
+                    },
+                },
+                "Buy",
+            )
+
+    result = run_trading_agents_analysis(
+        "nvda", date(2026, 8, 19), graph=FakeResearchGraph()
+    )
+
+    assert result.proposal.rating == "Buy"
+    assert result.agent_outputs["news"].content == "Material product announcement."
+    assert result.agent_outputs["news"].evidence_ids == ["source-1"]
+    assert result.agent_outputs["news"].confidence == 0.75
+    assert result.agent_outputs["news"].prompt_tokens == 12
+    assert result.agent_outputs["bull"].content == "Bull case."
+    assert result.agent_outputs["risk"].content == "Risk is acceptable."
+    assert result.agent_outputs["portfolio_manager"].content == "Final portfolio decision."
 
 
 def test_research_proposal_api_persists(tmp_path: Path, monkeypatch) -> None:
@@ -88,13 +138,541 @@ def test_research_proposal_reports_missing_optional_engine(tmp_path: Path, monke
         assert "agents" in response.json()["detail"]
 
 
+def test_approved_agent_proposal_creates_exactly_one_paper_order(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    proposal = TradingProposal(
+        ticker="NVDA",
+        analysis_date=date(2026, 8, 18),
+        rating="Buy",
+        suggested_paper_action="buy",
+        report="Approval test.",
+    )
+
+    with TestClient(app) as client:
+        client.app.state.control.store.save_research_proposal(proposal)
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        approved = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"quantity": 3, "price": "125.50", "reason": "human reviewed"},
+        )
+
+        assert approved.status_code == 200
+        result = approved.json()
+        assert result["proposal"]["approval_status"] == "approved"
+        assert result["proposal"]["order_created"] is True
+        assert result["proposal"]["trade_id"] == result["trade"]["trade_id"]
+        assert result["trade"]["quantity"] == 3
+        assert result["event"]["event_type"] == "research.proposal.approved"
+        assert client.get(
+            "/api/v1/paper/portfolio", params={"project_id": "investment-town"}
+        ).json()["positions"][0]["quantity"] == 3
+
+        duplicate = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"quantity": 3, "price": "125.50"},
+        )
+        assert duplicate.status_code == 409
+        assert len(
+            client.get(
+                "/api/v1/paper/trades", params={"project_id": "investment-town"}
+            ).json()
+        ) == 1
+
+
+def test_rejected_agent_proposal_cannot_create_order(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    proposal = TradingProposal(
+        ticker="TSLA",
+        analysis_date=date(2026, 8, 18),
+        rating="Sell",
+        suggested_paper_action="sell",
+        report="Reject test.",
+    )
+
+    with TestClient(app) as client:
+        client.app.state.control.store.save_research_proposal(proposal)
+        rejected = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/reject",
+            json={"reason": "evidence is insufficient"},
+        )
+
+        assert rejected.status_code == 200
+        result = rejected.json()
+        assert result["proposal"]["approval_status"] == "rejected"
+        assert result["proposal"]["order_created"] is False
+        assert result["proposal"]["decision_reason"] == "evidence is insufficient"
+        assert result["trade"] is None
+        assert result["event"]["event_type"] == "research.proposal.rejected"
+
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        later_approval = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"quantity": 1, "price": "100"},
+        )
+        assert later_approval.status_code == 409
+
+
+def test_hold_proposal_approval_records_decision_without_order(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    proposal = TradingProposal(
+        ticker="MSFT",
+        analysis_date=date(2026, 8, 18),
+        rating="Hold",
+        suggested_paper_action="hold",
+        report="No position change.",
+    )
+
+    with TestClient(app) as client:
+        client.app.state.control.store.save_research_proposal(proposal)
+        approved = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"reason": "hold thesis accepted"},
+        )
+
+        assert approved.status_code == 200
+        assert approved.json()["proposal"]["approval_status"] == "approved"
+        assert approved.json()["proposal"]["order_created"] is False
+        assert approved.json()["trade"] is None
+
+
+def test_buy_proposal_requires_terms_and_running_project(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    proposal = TradingProposal(
+        ticker="NVDA",
+        analysis_date=date(2026, 8, 18),
+        rating="Buy",
+        suggested_paper_action="buy",
+        report="Terms test.",
+    )
+
+    with TestClient(app) as client:
+        client.app.state.control.store.save_research_proposal(proposal)
+        missing_terms = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve", json={}
+        )
+        assert missing_terms.status_code == 409
+
+        stopped_project = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"quantity": 1, "price": "100"},
+        )
+        assert stopped_project.status_code == 409
+        restored = client.get(
+            f"/api/v1/research/proposals/{proposal.proposal_id}"
+        ).json()
+        assert restored["approval_status"] == "pending"
+        assert restored["order_created"] is False
+
+
+def test_existing_proposal_database_is_migrated_in_place(tmp_path: Path) -> None:
+    database = tmp_path / "control.db"
+    proposal = TradingProposal(
+        ticker="NVDA",
+        analysis_date=date(2026, 8, 18),
+        rating="Hold",
+        suggested_paper_action="hold",
+        report="Stored before the approval MVP.",
+    )
+    values = proposal.model_dump(mode="json")
+    connection = sqlite3.connect(database)
+    with connection:
+        connection.execute(
+            """
+            CREATE TABLE research_proposals (
+                proposal_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                analysis_date TEXT NOT NULL,
+                rating TEXT NOT NULL,
+                suggested_paper_action TEXT NOT NULL,
+                report TEXT NOT NULL,
+                source TEXT NOT NULL,
+                human_approval_required INTEGER NOT NULL,
+                approval_status TEXT NOT NULL,
+                order_created INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research_proposals VALUES (
+                :proposal_id, :project_id, :ticker, :analysis_date, :rating,
+                :suggested_paper_action, :report, :source, :human_approval_required,
+                :approval_status, :order_created, :created_at
+            )
+            """,
+            values,
+        )
+    connection.close()
+
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        restored = client.get(
+            f"/api/v1/research/proposals/{proposal.proposal_id}"
+        ).json()
+        assert restored["approval_status"] == "pending"
+        assert restored["decided_at"] is None
+        assert restored["trade_id"] is None
+
+
+def test_existing_research_run_database_is_migrated_in_place(tmp_path: Path) -> None:
+    database = tmp_path / "control.db"
+    run_id = str(uuid4())
+    task_id = str(uuid4())
+    connection = sqlite3.connect(database)
+    with connection:
+        connection.executescript(
+            """
+            CREATE TABLE research_runs (
+                run_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                analysis_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_stage INTEGER NOT NULL,
+                final_rating TEXT,
+                proposal_id TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE TABLE research_agent_tasks (
+                task_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL,
+                stage INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                started_at TEXT,
+                completed_at TEXT,
+                UNIQUE(run_id, agent_id)
+            );
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research_runs VALUES (
+                ?, 'investment-town', 'NVDA', '2026-08-19', 'completed', 3,
+                'Hold', NULL, NULL, '2026-08-19T00:00:00+00:00',
+                '2026-08-19T00:01:00+00:00', '2026-08-19T00:01:00+00:00'
+            )
+            """,
+            (run_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO research_agent_tasks VALUES (
+                ?, ?, 'news', 0, 'completed', 'Legacy result',
+                '2026-08-19T00:00:00+00:00', '2026-08-19T00:00:10+00:00'
+            )
+            """,
+            (task_id, run_id),
+        )
+    connection.close()
+
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        detail = client.get(f"/api/v1/research/runs/{run_id}").json()
+        assert detail["run"]["attempt"] == 1
+        assert detail["run"]["prompt_tokens"] == 0
+        assert detail["run"]["estimated_cost"] == "0"
+        assert detail["tasks"][0]["evidence_ids"] == []
+        assert detail["checkpoints"] == []
+
+
+def test_durable_research_run_records_agent_tasks_and_blackboard(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "control.db"
+
+    def fake_analysis(ticker: str, analysis_date: date) -> TradingAnalysisResult:
+        proposal = TradingProposal(
+            ticker=ticker,
+            analysis_date=analysis_date,
+            rating="Overweight",
+            suggested_paper_action="buy",
+            report="Portfolio conclusion.",
+        )
+        return TradingAnalysisResult(
+            proposal=proposal,
+            agent_outputs={
+                "news": AgentResearchOutput(
+                    content="News result.",
+                    evidence_ids=["news-1", "filing-2"],
+                    confidence=0.82,
+                    model="research-model",
+                    prompt_tokens=100,
+                    completion_tokens=20,
+                    estimated_cost="0.001",
+                ),
+                "fundamental": AgentResearchOutput(content="Fundamental result."),
+                "macro": AgentResearchOutput(content="Macro result."),
+                "quant": AgentResearchOutput(content="Quant result."),
+                "bull": AgentResearchOutput(content="Bull result."),
+                "bear": AgentResearchOutput(content="Bear result."),
+                "risk": AgentResearchOutput(content="Risk result."),
+                "portfolio_manager": AgentResearchOutput(
+                    content="Portfolio conclusion.",
+                    model="reasoning-model",
+                    prompt_tokens=50,
+                    completion_tokens=10,
+                    estimated_cost="0.002",
+                ),
+            },
+        )
+
+    monkeypatch.setattr(
+        "investment_town.control.run_trading_agents_analysis", fake_analysis
+    )
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        created = client.post(
+            "/api/v1/research/runs",
+            json={"ticker": "nvda", "analysis_date": "2026-08-19"},
+        )
+        assert created.status_code == 202
+        assert created.json()["status"] == "running"
+
+        run_id = created.json()["run_id"]
+        detail = client.get(f"/api/v1/research/runs/{run_id}").json()
+        assert detail["run"]["status"] == "completed"
+        assert detail["run"]["ticker"] == "NVDA"
+        assert detail["run"]["final_rating"] == "Overweight"
+        assert len(detail["tasks"]) == 8
+        assert {task["status"] for task in detail["tasks"]} == {"completed"}
+        assert len(detail["blackboard"]) == 8
+        assert len(detail["checkpoints"]) == 4
+        assert {checkpoint["stage"] for checkpoint in detail["checkpoints"]} == {
+            0,
+            1,
+            2,
+            3,
+        }
+        assert len(detail["usage"]) == 2
+        assert detail["run"]["prompt_tokens"] == 150
+        assert detail["run"]["completion_tokens"] == 30
+        assert detail["run"]["estimated_cost"] == "0.003"
+        news_task = next(task for task in detail["tasks"] if task["agent_id"] == "news")
+        assert news_task["confidence"] == 0.82
+        assert news_task["evidence_ids"] == ["news-1", "filing-2"]
+        assert {entry["agent_id"] for entry in detail["blackboard"]} == {
+            "news",
+            "fundamental",
+            "macro",
+            "quant",
+            "bull",
+            "bear",
+            "risk",
+            "portfolio_manager",
+        }
+        assert client.get("/api/v1/research/proposals").json()[0]["proposal_id"] == detail[
+            "run"
+        ]["proposal_id"]
+
+    reopened = create_app(Settings(database_path=str(database)))
+    with TestClient(reopened) as client:
+        restored = client.get(f"/api/v1/research/runs/{run_id}").json()
+        assert restored["run"]["status"] == "completed"
+        assert restored["blackboard"][0]["content"]
+
+
+def test_research_run_failure_is_durable_and_does_not_create_proposal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def failed_analysis(ticker: str, analysis_date: date) -> TradingAnalysisResult:
+        raise RuntimeError("provider secret should not be persisted")
+
+    monkeypatch.setattr(
+        "investment_town.control.run_trading_agents_analysis", failed_analysis
+    )
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        stopped = client.post("/api/v1/research/runs", json={"ticker": "NVDA"})
+        assert stopped.status_code == 409
+
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        created = client.post("/api/v1/research/runs", json={"ticker": "NVDA"})
+        detail = client.get(
+            f"/api/v1/research/runs/{created.json()['run_id']}"
+        ).json()
+        assert detail["run"]["status"] == "failed"
+        assert detail["run"]["error"] == "TradingAgents analysis failed"
+        assert {task["status"] for task in detail["tasks"]} == {"failed"}
+        assert detail["blackboard"] == []
+        assert client.get("/api/v1/research/proposals").json() == []
+
+
+def test_interrupted_research_run_is_failed_on_restart(tmp_path: Path) -> None:
+    database = tmp_path / "control.db"
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+
+    reopened = create_app(Settings(database_path=str(database)))
+    with TestClient(reopened) as client:
+        detail = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert detail["run"]["status"] == "failed"
+        assert "service restart" in detail["run"]["error"]
+
+
+def test_project_kill_fails_active_research_run(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+
+        killed = client.post(
+            "/api/v1/projects/investment-town/commands/kill",
+            json={"reason": "operator emergency stop"},
+        )
+        assert killed.status_code == 200
+        detail = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert detail["run"]["status"] == "failed"
+        assert "project state killed" in detail["run"]["error"]
+        assert client.get("/api/v1/research/proposals").json() == []
+
+
+def test_project_pause_checkpoints_active_research_run(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+
+        paused = client.post(
+            "/api/v1/projects/investment-town/commands/pause",
+            json={"reason": "operator review"},
+        )
+        assert paused.status_code == 200
+        detail = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert detail["run"]["status"] == "paused"
+        assert detail["checkpoints"][-1]["state"] == "paused"
+
+        client.post("/api/v1/projects/investment-town/commands/resume", json={})
+        still_paused = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert still_paused["run"]["status"] == "paused"
+
+        client.post("/api/v1/projects/investment-town/commands/kill", json={})
+        killed = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert killed["run"]["status"] == "failed"
+
+
+def test_research_run_resumes_from_saved_stage_checkpoint(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def should_not_rerun_provider(ticker: str, analysis_date: date) -> TradingAnalysisResult:
+        raise AssertionError("resume must use the durable analysis snapshot")
+
+    monkeypatch.setattr(
+        "investment_town.control.run_trading_agents_analysis", should_not_rerun_provider
+    )
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    analysis = TradingAnalysisResult(
+        proposal=TradingProposal(
+            ticker="NVDA",
+            analysis_date=date(2026, 8, 19),
+            rating="Hold",
+            suggested_paper_action="hold",
+            report="Checkpoint result.",
+        ),
+        agent_outputs={
+            agent_id: AgentResearchOutput(content=f"{agent_id} result")
+            for agent_id in (
+                "news",
+                "fundamental",
+                "macro",
+                "quant",
+                "bull",
+                "bear",
+                "risk",
+                "portfolio_manager",
+            )
+        },
+    )
+
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+        client.app.state.control.store.save_research_analysis_snapshot(
+            str(run.run_id), analysis
+        )
+        detail, _, completed = client.app.state.control.store.process_next_research_stage(
+            str(run.run_id)
+        )
+        assert completed is False
+        assert detail.run.current_stage == 1
+
+        paused = client.post(f"/api/v1/research/runs/{run.run_id}/pause")
+        assert paused.status_code == 200
+        assert paused.json()["run"]["status"] == "paused"
+        assert paused.json()["checkpoints"][-1]["state"] == "paused"
+
+        resumed = client.post(f"/api/v1/research/runs/{run.run_id}/resume")
+        assert resumed.status_code == 200
+        restored = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert restored["run"]["status"] == "completed"
+        completed_checkpoints = [
+            item for item in restored["checkpoints"] if item["state"] == "completed"
+        ]
+        assert [item["stage"] for item in completed_checkpoints] == [0, 1, 2, 3]
+
+
+def test_failed_research_run_can_retry(tmp_path: Path, monkeypatch) -> None:
+    def successful_retry(ticker: str, analysis_date: date) -> TradingAnalysisResult:
+        return TradingAnalysisResult(
+            proposal=TradingProposal(
+                ticker=ticker,
+                analysis_date=analysis_date,
+                rating="Hold",
+                suggested_paper_action="hold",
+                report="Retry completed.",
+            ),
+            agent_outputs={
+                "portfolio_manager": AgentResearchOutput(content="Retry completed.")
+            },
+        )
+
+    monkeypatch.setattr(
+        "investment_town.control.run_trading_agents_analysis", successful_retry
+    )
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+        client.app.state.control.store.fail_research_run(
+            str(run.run_id), "temporary provider failure"
+        )
+
+        retried = client.post(f"/api/v1/research/runs/{run.run_id}/retry")
+        assert retried.status_code == 200
+        restored = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert restored["run"]["status"] == "completed"
+        assert restored["run"]["attempt"] == 2
+        assert all(task["attempt"] == 2 for task in restored["tasks"])
+        assert len(client.get("/api/v1/research/proposals").json()) == 1
+
+
 def test_dashboard_exposes_agent_proposal_form(tmp_path: Path) -> None:
     app = create_app(Settings(database_path=str(tmp_path / "control.db")))
     with TestClient(app) as client:
         response = client.get("/")
         assert response.status_code == 200
-        assert "MVP 1.2A Agent Proposal" in response.text
+        assert "MVP 2B Checkpointed Orchestrator" in response.text
         assert 'id="research-form"' in response.text
+        assert 'id="research-runs"' in response.text
 
 
 def test_project_command_persists_event_and_audit(tmp_path: Path) -> None:
