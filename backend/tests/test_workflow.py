@@ -7,8 +7,10 @@ from fastapi.testclient import TestClient
 from investment_town.core.config import Settings
 from investment_town.integrations.trading_agents import (
     TradingAgentsUnavailable,
+    TradingAnalysisResult,
     TradingProposal,
     analyze_with_trading_agents,
+    run_trading_agents_analysis,
 )
 from investment_town.main import create_app
 from investment_town.workflows.research import research_workflow_outline
@@ -42,6 +44,38 @@ def test_trading_agents_result_is_a_proposal_only() -> None:
     assert proposal.human_approval_required is True
     assert proposal.approval_status == "pending"
     assert proposal.order_created is False
+
+
+def test_trading_agents_state_is_normalized_for_the_blackboard() -> None:
+    class FakeResearchGraph:
+        def propagate(
+            self, company_name: str, trade_date: str, asset_type: str = "stock"
+        ) -> tuple[dict[str, object], str]:
+            return (
+                {
+                    "news_report": "Material product announcement.",
+                    "fundamentals_report": "Revenue growth remains strong.",
+                    "sentiment_report": "Risk appetite is neutral.",
+                    "market_report": "Momentum is positive.",
+                    "investment_debate_state": {
+                        "bull_history": "Bull case.",
+                        "bear_history": "Bear case.",
+                    },
+                    "risk_debate_state": {"judge_decision": "Risk is acceptable."},
+                    "final_trade_decision": "Final portfolio decision.",
+                },
+                "Buy",
+            )
+
+    result = run_trading_agents_analysis(
+        "nvda", date(2026, 8, 19), graph=FakeResearchGraph()
+    )
+
+    assert result.proposal.rating == "Buy"
+    assert result.agent_outputs["news"] == "Material product announcement."
+    assert result.agent_outputs["bull"] == "Bull case."
+    assert result.agent_outputs["risk"] == "Risk is acceptable."
+    assert result.agent_outputs["portfolio_manager"] == "Final portfolio decision."
 
 
 def test_research_proposal_api_persists(tmp_path: Path, monkeypatch) -> None:
@@ -267,13 +301,144 @@ def test_existing_proposal_database_is_migrated_in_place(tmp_path: Path) -> None
         assert restored["trade_id"] is None
 
 
+def test_durable_research_run_records_agent_tasks_and_blackboard(
+    tmp_path: Path, monkeypatch
+) -> None:
+    database = tmp_path / "control.db"
+
+    def fake_analysis(ticker: str, analysis_date: date) -> TradingAnalysisResult:
+        proposal = TradingProposal(
+            ticker=ticker,
+            analysis_date=analysis_date,
+            rating="Overweight",
+            suggested_paper_action="buy",
+            report="Portfolio conclusion.",
+        )
+        return TradingAnalysisResult(
+            proposal=proposal,
+            agent_outputs={
+                "news": "News result.",
+                "fundamental": "Fundamental result.",
+                "macro": "Macro result.",
+                "quant": "Quant result.",
+                "bull": "Bull result.",
+                "bear": "Bear result.",
+                "risk": "Risk result.",
+                "portfolio_manager": "Portfolio conclusion.",
+            },
+        )
+
+    monkeypatch.setattr(
+        "investment_town.control.run_trading_agents_analysis", fake_analysis
+    )
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        created = client.post(
+            "/api/v1/research/runs",
+            json={"ticker": "nvda", "analysis_date": "2026-08-19"},
+        )
+        assert created.status_code == 202
+        assert created.json()["status"] == "running"
+
+        run_id = created.json()["run_id"]
+        detail = client.get(f"/api/v1/research/runs/{run_id}").json()
+        assert detail["run"]["status"] == "completed"
+        assert detail["run"]["ticker"] == "NVDA"
+        assert detail["run"]["final_rating"] == "Overweight"
+        assert len(detail["tasks"]) == 8
+        assert {task["status"] for task in detail["tasks"]} == {"completed"}
+        assert len(detail["blackboard"]) == 8
+        assert {entry["agent_id"] for entry in detail["blackboard"]} == {
+            "news",
+            "fundamental",
+            "macro",
+            "quant",
+            "bull",
+            "bear",
+            "risk",
+            "portfolio_manager",
+        }
+        assert client.get("/api/v1/research/proposals").json()[0]["proposal_id"] == detail[
+            "run"
+        ]["proposal_id"]
+
+    reopened = create_app(Settings(database_path=str(database)))
+    with TestClient(reopened) as client:
+        restored = client.get(f"/api/v1/research/runs/{run_id}").json()
+        assert restored["run"]["status"] == "completed"
+        assert restored["blackboard"][0]["content"]
+
+
+def test_research_run_failure_is_durable_and_does_not_create_proposal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    def failed_analysis(ticker: str, analysis_date: date) -> TradingAnalysisResult:
+        raise RuntimeError("provider secret should not be persisted")
+
+    monkeypatch.setattr(
+        "investment_town.control.run_trading_agents_analysis", failed_analysis
+    )
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        stopped = client.post("/api/v1/research/runs", json={"ticker": "NVDA"})
+        assert stopped.status_code == 409
+
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        created = client.post("/api/v1/research/runs", json={"ticker": "NVDA"})
+        detail = client.get(
+            f"/api/v1/research/runs/{created.json()['run_id']}"
+        ).json()
+        assert detail["run"]["status"] == "failed"
+        assert detail["run"]["error"] == "TradingAgents analysis failed"
+        assert {task["status"] for task in detail["tasks"]} == {"failed"}
+        assert detail["blackboard"] == []
+        assert client.get("/api/v1/research/proposals").json() == []
+
+
+def test_interrupted_research_run_is_failed_on_restart(tmp_path: Path) -> None:
+    database = tmp_path / "control.db"
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+
+    reopened = create_app(Settings(database_path=str(database)))
+    with TestClient(reopened) as client:
+        detail = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert detail["run"]["status"] == "failed"
+        assert "service restart" in detail["run"]["error"]
+
+
+def test_project_kill_fails_active_research_run(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    with TestClient(app) as client:
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        run, _ = client.app.state.control.store.create_research_run(
+            "NVDA", date(2026, 8, 19)
+        )
+
+        killed = client.post(
+            "/api/v1/projects/investment-town/commands/kill",
+            json={"reason": "operator emergency stop"},
+        )
+        assert killed.status_code == 200
+        detail = client.get(f"/api/v1/research/runs/{run.run_id}").json()
+        assert detail["run"]["status"] == "failed"
+        assert "project state killed" in detail["run"]["error"]
+        assert client.get("/api/v1/research/proposals").json() == []
+
+
 def test_dashboard_exposes_agent_proposal_form(tmp_path: Path) -> None:
     app = create_app(Settings(database_path=str(tmp_path / "control.db")))
     with TestClient(app) as client:
         response = client.get("/")
         assert response.status_code == 200
-        assert "MVP 1.2B Human Approval Gate" in response.text
+        assert "MVP 2A Durable Research Runs" in response.text
         assert 'id="research-form"' in response.text
+        assert 'id="research-runs"' in response.text
 
 
 def test_project_command_persists_event_and_audit(tmp_path: Path) -> None:

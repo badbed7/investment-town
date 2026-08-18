@@ -15,6 +15,8 @@ Python is the source-of-truth runtime for Investment Town.
 - Mobile-friendly control dashboard
 - Durable Agent proposal review queue
 - Human approval or rejection before an Agent-suggested Paper order
+- Durable multi-Agent research runs, task timeline, and shared Blackboard
+- Safe interrupted-run recovery after a service restart
 
 ## Run locally
 

@@ -1,4 +1,4 @@
-# MVP 1.2B Control, Agent Approval, and Paper Trading API
+# MVP 2A Research Run, Agent Approval, and Paper Trading API
 
 Base path: `/api/v1`
 
@@ -21,6 +21,9 @@ fail closed if `CONTROL_API_TOKEN` is missing.
 | `GET` | `/research/proposals/{proposal_id}` | Read one durable Agent proposal |
 | `POST` | `/research/proposals/{proposal_id}/approve` | Approve and optionally create its Paper order |
 | `POST` | `/research/proposals/{proposal_id}/reject` | Reject without creating an order |
+| `POST` | `/research/runs` | Start a durable multi-Agent research run |
+| `GET` | `/research/runs` | List durable research runs |
+| `GET` | `/research/runs/{run_id}` | Read run, Agent tasks, and Blackboard entries |
 | `GET` | `/paper/portfolio` | Paper cash, cost basis, realized P&L, and positions |
 | `GET` | `/paper/trades` | Durable paper trade history |
 | `POST` | `/paper/orders` | Immediately fill a manually priced paper order |
@@ -127,9 +130,32 @@ trade ID, and a `research.proposal.approved` or `research.proposal.rejected` eve
 
 No endpoint can turn an Agent proposal into a live-broker order.
 
+## Durable research run
+
+`POST /research/runs` accepts the same ticker and analysis date as the legacy direct proposal
+endpoint and returns HTTP `202`. The project must be running.
+
+```json
+{
+  "ticker": "NVDA",
+  "analysis_date": "2026-08-19"
+}
+```
+
+The returned run begins as `running`. Fetch its detail endpoint to inspect the terminal
+state, eight staged Agent tasks, and any shared Blackboard entries. Successful completion
+atomically stores normalized Agent outputs and a linked pending proposal. Missing upstream
+Agent fields become `skipped` tasks rather than fabricated content. Provider failure creates
+no proposal, and a run interrupted by service restart becomes `failed` on the next startup.
+
+The direct `POST /research/proposals` endpoint remains for compatibility, but the dashboard
+uses durable runs.
+
 ## MVP storage boundary
 
-MVP 1.2B uses SQLite, an in-process proposal-decision lock, and an in-process WebSocket
+MVP 2A uses SQLite, FastAPI background tasks, an in-process proposal-decision lock, and an
+in-process WebSocket
 fan-out. This is sufficient for one control API process. Move project, event, audit, paper
 account, position, and trade records to PostgreSQL with one transactional approval/order
-service and move the fan-out to Redis Streams before running multiple API instances.
+service, run research through durable workers, and move the fan-out to Redis Streams before
+running multiple API instances.

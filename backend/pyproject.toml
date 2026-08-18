@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "investment-town-backend"
-version = "0.5.0"
+version = "0.6.0"
 description = "Backend runtime for Investment Town multi-agent investment research and control plane."
 requires-python = ">=3.11"
 dependencies = [

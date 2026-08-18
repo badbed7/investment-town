@@ -34,6 +34,7 @@ flowchart LR
 - [Codespaces and Railway deployment](docs/DEPLOYMENT.md)
 - [Toss Securities live-trading plan](docs/TOSS_LIVE_TRADING_PLAN.md)
 - [TradingAgents reference integration](docs/TRADING_AGENTS_REFERENCE.md)
+- [MVP 2A research runtime](docs/RESEARCH_RUNTIME.md)
 
 ## Repository structure
 
@@ -82,13 +83,15 @@ Then open `http://127.0.0.1:8000` for the mobile-friendly control dashboard or
 `http://127.0.0.1:8000/docs` for the API. The current runtime is intentionally
 **paper-trading only**.
 
-MVP 1.2B stores project state, events, audit records, Agent proposals, human decisions,
-the paper account, positions, and trade history in a local SQLite file. Agent proposals
+MVP 2A stores project state, events, audit records, durable research runs, Agent task
+timelines, shared Blackboard entries, Agent proposals, human decisions, the paper account,
+positions, and trade history in a local SQLite file. Agent proposals
 cannot trade by themselves: a user must approve a pending proposal and provide paper-order
 terms. Paper orders use a user-entered price and fill immediately; no market-data feed or
 brokerage API is contacted. This keeps the first
 vertical slice runnable without infrastructure. PostgreSQL and Redis become necessary
-when the control API is deployed with multiple instances.
+when the control API is deployed with multiple instances. A run interrupted by a service
+restart is restored as failed rather than being left permanently active.
 
 ## Recommended first milestone
 

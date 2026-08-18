@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Literal, Protocol
@@ -22,6 +23,12 @@ class TradingGraphRunner(Protocol):
     def propagate(
         self, company_name: str, trade_date: str, asset_type: str = "stock"
     ) -> tuple[dict[str, Any], str]: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TradingAnalysisResult:
+    proposal: "TradingProposal"
+    agent_outputs: dict[str, str]
 
 
 class ResearchAnalysisRequest(BaseModel):
@@ -67,13 +74,61 @@ class TradingAgentsUnavailable(RuntimeError):
     pass
 
 
-def analyze_with_trading_agents(
+def _as_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    return str(value).strip()
+
+
+def _nested_text(state: dict[str, Any], *path: str) -> str:
+    value: Any = state
+    for key in path:
+        if not isinstance(value, dict):
+            return ""
+        value = value.get(key)
+    return _as_text(value)
+
+
+def _agent_outputs(state: dict[str, Any]) -> dict[str, str]:
+    candidates: dict[str, tuple[tuple[str, ...], ...]] = {
+        "news": (("news_report",),),
+        "fundamental": (("fundamentals_report",), ("fundamental_report",)),
+        "macro": (("sentiment_report",), ("macro_report",)),
+        "quant": (("market_report",), ("technical_report",)),
+        "bull": (
+            ("investment_debate_state", "bull_history"),
+            ("investment_debate_state", "bull_research"),
+        ),
+        "bear": (
+            ("investment_debate_state", "bear_history"),
+            ("investment_debate_state", "bear_research"),
+        ),
+        "risk": (
+            ("risk_debate_state", "judge_decision"),
+            ("risk_debate_state", "risk_decision"),
+        ),
+        "portfolio_manager": (
+            ("final_trade_decision",),
+            ("trader_investment_plan",),
+        ),
+    }
+    outputs: dict[str, str] = {}
+    for agent_id, paths in candidates.items():
+        outputs[agent_id] = next(
+            (text for path in paths if (text := _nested_text(state, *path))), ""
+        )
+    return outputs
+
+
+def run_trading_agents_analysis(
     ticker: str,
     analysis_date: date,
     *,
     graph: TradingGraphRunner | None = None,
-) -> TradingProposal:
-    """Run TradingAgents and return a proposal without submitting an order."""
+) -> TradingAnalysisResult:
+    """Run TradingAgents and normalize its durable Agent outputs without trading."""
     if graph is None:
         try:
             from tradingagents.graph.trading_graph import TradingAgentsGraph
@@ -88,10 +143,21 @@ def analyze_with_trading_agents(
     if rating not in _ACTIONS:
         raise ValueError(f"unsupported TradingAgents rating: {raw_rating!r}")
 
-    return TradingProposal(
+    proposal = TradingProposal(
         ticker=ticker.upper(),
         analysis_date=analysis_date,
         rating=rating,
         suggested_paper_action=_ACTIONS[rating],
-        report=str(state.get("final_trade_decision", "")),
+        report=_as_text(state.get("final_trade_decision")),
     )
+    return TradingAnalysisResult(proposal=proposal, agent_outputs=_agent_outputs(state))
+
+
+def analyze_with_trading_agents(
+    ticker: str,
+    analysis_date: date,
+    *,
+    graph: TradingGraphRunner | None = None,
+) -> TradingProposal:
+    """Compatibility wrapper returning only the human-gated proposal."""
+    return run_trading_agents_analysis(ticker, analysis_date, graph=graph).proposal

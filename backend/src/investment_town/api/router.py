@@ -5,6 +5,7 @@ from typing import Annotated
 
 from fastapi import (
     APIRouter,
+    BackgroundTasks,
     Depends,
     HTTPException,
     Query,
@@ -24,7 +25,12 @@ from investment_town.broker.paper import (
     PaperPortfolio,
     PaperTrade,
 )
-from investment_town.control import InvalidProposalDecision, InvalidTransition, ProjectControl
+from investment_town.control import (
+    InvalidProposalDecision,
+    InvalidResearchRun,
+    InvalidTransition,
+    ProjectControl,
+)
 from investment_town.core.config import Settings
 from investment_town.integrations.trading_agents import (
     ProposalApprovalRequest,
@@ -42,6 +48,7 @@ from investment_town.schemas.control import (
     ControlEvent,
     Project,
 )
+from investment_town.schemas.research import ResearchRun, ResearchRunDetail
 from investment_town.workflows.research import research_workflow_outline
 
 router = APIRouter(prefix="/api/v1")
@@ -124,6 +131,40 @@ async def create_research_proposal(
             status.HTTP_502_BAD_GATEWAY, "TradingAgents analysis failed"
         ) from error
     return control.store.save_research_proposal(proposal)
+
+
+@router.post("/research/runs", response_model=ResearchRun, status_code=202)
+async def create_research_run(
+    body: ResearchAnalysisRequest,
+    background_tasks: BackgroundTasks,
+    _: Actor,
+    control: Control,
+) -> ResearchRun:
+    try:
+        run = control.start_research_run(body.ticker, body.analysis_date)
+    except KeyError as error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "project not found") from error
+    except InvalidResearchRun as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+    background_tasks.add_task(control.execute_research_run, str(run.run_id))
+    return run
+
+
+@router.get("/research/runs", response_model=list[ResearchRun])
+def research_runs(
+    _: Actor,
+    control: Control,
+    limit: Annotated[int, Query(ge=1, le=100)] = 30,
+) -> list[ResearchRun]:
+    return control.store.list_research_runs(limit)
+
+
+@router.get("/research/runs/{run_id}", response_model=ResearchRunDetail)
+def research_run(run_id: str, _: Actor, control: Control) -> ResearchRunDetail:
+    detail = control.store.get_research_run_detail(run_id)
+    if detail is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "research run not found")
+    return detail
 
 
 @router.get("/research/proposals", response_model=list[TradingProposal])
