@@ -1,4 +1,4 @@
-# MVP 1.2A Control, Agent Proposal, and Paper Trading API
+# MVP 1.2B Control, Agent Approval, and Paper Trading API
 
 Base path: `/api/v1`
 
@@ -18,6 +18,9 @@ fail closed if `CONTROL_API_TOKEN` is missing.
 | `GET` | `/audit` | Durable command audit entries |
 | `POST` | `/research/proposals` | Run TradingAgents and save a pending proposal |
 | `GET` | `/research/proposals` | List durable Agent proposals |
+| `GET` | `/research/proposals/{proposal_id}` | Read one durable Agent proposal |
+| `POST` | `/research/proposals/{proposal_id}/approve` | Approve and optionally create its Paper order |
+| `POST` | `/research/proposals/{proposal_id}/reject` | Reject without creating an order |
 | `GET` | `/paper/portfolio` | Paper cash, cost basis, realized P&L, and positions |
 | `GET` | `/paper/trades` | Durable paper trade history |
 | `POST` | `/paper/orders` | Immediately fill a manually priced paper order |
@@ -91,11 +94,42 @@ report. It never submits an order.
 ```
 
 The endpoint returns HTTP `503` until the backend `agents` extra is installed and HTTP `502`
-when the configured LLM or market-data provider fails. Every saved proposal has
+when the configured LLM or market-data provider fails. Every saved proposal begins with
 `human_approval_required: true`, `approval_status: "pending"`, and `order_created: false`.
+
+### Human decision
+
+A buy or sell approval must include the operator-selected whole-share quantity and Paper
+fill price. The project must already be running, and the existing Paper cash/position checks
+still apply.
+
+```json
+{
+  "quantity": 10,
+  "price": "125.50",
+  "reason": "reviewed the report and risk context"
+}
+```
+
+An approved `hold` proposal records the decision without creating an order and does not
+require quantity or price. Rejection accepts only an optional reason:
+
+```json
+{
+  "reason": "evidence is insufficient"
+}
+```
+
+Only a `pending` proposal can be decided. A repeated approval, a later approval after
+rejection, missing order terms, an invalid project state, or insufficient Paper balance
+returns HTTP `409`. Successful decisions persist the operator, timestamp, reason, optional
+trade ID, and a `research.proposal.approved` or `research.proposal.rejected` event.
+
+No endpoint can turn an Agent proposal into a live-broker order.
 
 ## MVP storage boundary
 
-MVP 1.2A uses SQLite and an in-process WebSocket fan-out. This is sufficient for one control
-API process. Move project, event, audit, paper account, position, and trade records to
-PostgreSQL and the fan-out to Redis Streams before running multiple API instances.
+MVP 1.2B uses SQLite, an in-process proposal-decision lock, and an in-process WebSocket
+fan-out. This is sufficient for one control API process. Move project, event, audit, paper
+account, position, and trade records to PostgreSQL with one transactional approval/order
+service and move the fan-out to Redis Streams before running multiple API instances.

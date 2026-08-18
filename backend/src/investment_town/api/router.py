@@ -1,5 +1,6 @@
 import asyncio
 import secrets
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import (
@@ -13,6 +14,7 @@ from fastapi import (
     status,
 )
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from pydantic import BaseModel
 
 from investment_town.agents.registry import AGENT_ROLES
 from investment_town.broker.paper import (
@@ -22,9 +24,11 @@ from investment_town.broker.paper import (
     PaperPortfolio,
     PaperTrade,
 )
-from investment_town.control import InvalidTransition, ProjectControl
+from investment_town.control import InvalidProposalDecision, InvalidTransition, ProjectControl
 from investment_town.core.config import Settings
 from investment_town.integrations.trading_agents import (
+    ProposalApprovalRequest,
+    ProposalRejectionRequest,
     ResearchAnalysisRequest,
     TradingAgentsUnavailable,
     TradingProposal,
@@ -76,6 +80,12 @@ Actor = Annotated[str, Depends(authorize)]
 Control = Annotated[ProjectControl, Depends(_control)]
 
 
+class ProposalDecisionResult(BaseModel):
+    proposal: TradingProposal
+    trade: PaperTrade | None
+    event: ControlEvent
+
+
 @router.get("/health")
 def health(request: Request) -> dict[str, object]:
     app_settings = _settings(request)
@@ -123,6 +133,84 @@ def research_proposals(
     limit: Annotated[int, Query(ge=1, le=100)] = 30,
 ) -> list[TradingProposal]:
     return control.store.list_research_proposals(limit)
+
+
+@router.get("/research/proposals/{proposal_id}", response_model=TradingProposal)
+def research_proposal(proposal_id: str, _: Actor, control: Control) -> TradingProposal:
+    proposal = control.store.get_research_proposal(proposal_id)
+    if proposal is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal not found")
+    return proposal
+
+
+async def _decide_proposal(
+    control: ProjectControl,
+    proposal_id: str,
+    *,
+    approve: bool,
+    actor: str,
+    reason: str | None,
+    quantity: int | None = None,
+    price: Decimal | None = None,
+) -> ProposalDecisionResult:
+    try:
+        proposal, order, event = await control.decide_proposal(
+            proposal_id,
+            approve=approve,
+            actor=actor,
+            reason=reason,
+            quantity=quantity,
+            price=price,
+        )
+    except KeyError as error:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal not found") from error
+    except (InvalidProposalDecision, InvalidPaperOrder) as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error)) from error
+    return ProposalDecisionResult(
+        proposal=proposal,
+        trade=order.trade if order else None,
+        event=event,
+    )
+
+
+@router.post(
+    "/research/proposals/{proposal_id}/approve",
+    response_model=ProposalDecisionResult,
+)
+async def approve_research_proposal(
+    proposal_id: str,
+    body: ProposalApprovalRequest,
+    actor: Actor,
+    control: Control,
+) -> ProposalDecisionResult:
+    return await _decide_proposal(
+        control,
+        proposal_id,
+        approve=True,
+        actor=actor,
+        reason=body.reason,
+        quantity=body.quantity,
+        price=body.price,
+    )
+
+
+@router.post(
+    "/research/proposals/{proposal_id}/reject",
+    response_model=ProposalDecisionResult,
+)
+async def reject_research_proposal(
+    proposal_id: str,
+    body: ProposalRejectionRequest,
+    actor: Actor,
+    control: Control,
+) -> ProposalDecisionResult:
+    return await _decide_proposal(
+        control,
+        proposal_id,
+        approve=False,
+        actor=actor,
+        reason=body.reason,
+    )
 
 
 @router.get("/projects", response_model=list[Project])

@@ -1,4 +1,5 @@
 from datetime import UTC, date, datetime
+from decimal import Decimal
 from typing import Any, Literal, Protocol
 from uuid import UUID, uuid4
 
@@ -6,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 
 Rating = Literal["Buy", "Overweight", "Hold", "Underweight", "Sell"]
 PaperAction = Literal["buy", "hold", "sell"]
+ApprovalStatus = Literal["pending", "approved", "rejected"]
 
 _ACTIONS: dict[Rating, PaperAction] = {
     "Buy": "buy",
@@ -42,9 +44,23 @@ class TradingProposal(BaseModel):
     report: str
     source: str = "TauricResearch/TradingAgents"
     human_approval_required: bool = True
-    approval_status: Literal["pending"] = "pending"
+    approval_status: ApprovalStatus = "pending"
     order_created: bool = False
+    decided_at: datetime | None = None
+    decided_by: str | None = None
+    decision_reason: str | None = None
+    trade_id: UUID | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
+class ProposalApprovalRequest(BaseModel):
+    quantity: int | None = Field(default=None, gt=0, le=1_000_000)
+    price: Decimal | None = Field(default=None, gt=0, max_digits=12, decimal_places=2)
+    reason: str | None = Field(default=None, max_length=500)
+
+
+class ProposalRejectionRequest(BaseModel):
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class TradingAgentsUnavailable(RuntimeError):

@@ -27,13 +27,17 @@ TradingAgents ratings map to paper-trading suggestions as follows:
 Every suggestion still requires explicit human approval. Live brokerage execution remains
 disabled.
 
-## MVP 1.2A flow
+## MVP 1.2B flow
 
 1. `POST /api/v1/research/proposals` runs the pinned TradingAgents engine.
 2. The adapter maps its five-tier rating to a paper action suggestion.
 3. The proposal and report are stored in the existing SQLite volume.
 4. `GET /api/v1/research/proposals` restores the latest proposals after restart.
-5. No approval or order endpoint exists in MVP 1.2A, so a proposal cannot execute itself.
+5. A user reviews the proposal in the control dashboard and explicitly approves or rejects it.
+6. Buy and sell approvals require a user-entered quantity and Paper price.
+7. The existing Paper broker validates project state, cash, and positions before filling.
+8. Repeated decisions are rejected, and every decision emits a durable event.
+9. A proposal still cannot execute itself or reach a live broker.
 
 The Railway image continues to install the base backend only. Enable the optional dependency
 and configure an LLM provider key when Agent analysis is ready for trial operation.

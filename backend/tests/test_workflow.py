@@ -1,3 +1,4 @@
+import sqlite3
 from datetime import date
 from pathlib import Path
 
@@ -88,12 +89,190 @@ def test_research_proposal_reports_missing_optional_engine(tmp_path: Path, monke
         assert "agents" in response.json()["detail"]
 
 
+def test_approved_agent_proposal_creates_exactly_one_paper_order(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    proposal = TradingProposal(
+        ticker="NVDA",
+        analysis_date=date(2026, 8, 18),
+        rating="Buy",
+        suggested_paper_action="buy",
+        report="Approval test.",
+    )
+
+    with TestClient(app) as client:
+        client.app.state.control.store.save_research_proposal(proposal)
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        approved = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"quantity": 3, "price": "125.50", "reason": "human reviewed"},
+        )
+
+        assert approved.status_code == 200
+        result = approved.json()
+        assert result["proposal"]["approval_status"] == "approved"
+        assert result["proposal"]["order_created"] is True
+        assert result["proposal"]["trade_id"] == result["trade"]["trade_id"]
+        assert result["trade"]["quantity"] == 3
+        assert result["event"]["event_type"] == "research.proposal.approved"
+        assert client.get(
+            "/api/v1/paper/portfolio", params={"project_id": "investment-town"}
+        ).json()["positions"][0]["quantity"] == 3
+
+        duplicate = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"quantity": 3, "price": "125.50"},
+        )
+        assert duplicate.status_code == 409
+        assert len(
+            client.get(
+                "/api/v1/paper/trades", params={"project_id": "investment-town"}
+            ).json()
+        ) == 1
+
+
+def test_rejected_agent_proposal_cannot_create_order(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    proposal = TradingProposal(
+        ticker="TSLA",
+        analysis_date=date(2026, 8, 18),
+        rating="Sell",
+        suggested_paper_action="sell",
+        report="Reject test.",
+    )
+
+    with TestClient(app) as client:
+        client.app.state.control.store.save_research_proposal(proposal)
+        rejected = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/reject",
+            json={"reason": "evidence is insufficient"},
+        )
+
+        assert rejected.status_code == 200
+        result = rejected.json()
+        assert result["proposal"]["approval_status"] == "rejected"
+        assert result["proposal"]["order_created"] is False
+        assert result["proposal"]["decision_reason"] == "evidence is insufficient"
+        assert result["trade"] is None
+        assert result["event"]["event_type"] == "research.proposal.rejected"
+
+        client.post("/api/v1/projects/investment-town/commands/start", json={})
+        later_approval = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"quantity": 1, "price": "100"},
+        )
+        assert later_approval.status_code == 409
+
+
+def test_hold_proposal_approval_records_decision_without_order(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    proposal = TradingProposal(
+        ticker="MSFT",
+        analysis_date=date(2026, 8, 18),
+        rating="Hold",
+        suggested_paper_action="hold",
+        report="No position change.",
+    )
+
+    with TestClient(app) as client:
+        client.app.state.control.store.save_research_proposal(proposal)
+        approved = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"reason": "hold thesis accepted"},
+        )
+
+        assert approved.status_code == 200
+        assert approved.json()["proposal"]["approval_status"] == "approved"
+        assert approved.json()["proposal"]["order_created"] is False
+        assert approved.json()["trade"] is None
+
+
+def test_buy_proposal_requires_terms_and_running_project(tmp_path: Path) -> None:
+    app = create_app(Settings(database_path=str(tmp_path / "control.db")))
+    proposal = TradingProposal(
+        ticker="NVDA",
+        analysis_date=date(2026, 8, 18),
+        rating="Buy",
+        suggested_paper_action="buy",
+        report="Terms test.",
+    )
+
+    with TestClient(app) as client:
+        client.app.state.control.store.save_research_proposal(proposal)
+        missing_terms = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve", json={}
+        )
+        assert missing_terms.status_code == 409
+
+        stopped_project = client.post(
+            f"/api/v1/research/proposals/{proposal.proposal_id}/approve",
+            json={"quantity": 1, "price": "100"},
+        )
+        assert stopped_project.status_code == 409
+        restored = client.get(
+            f"/api/v1/research/proposals/{proposal.proposal_id}"
+        ).json()
+        assert restored["approval_status"] == "pending"
+        assert restored["order_created"] is False
+
+
+def test_existing_proposal_database_is_migrated_in_place(tmp_path: Path) -> None:
+    database = tmp_path / "control.db"
+    proposal = TradingProposal(
+        ticker="NVDA",
+        analysis_date=date(2026, 8, 18),
+        rating="Hold",
+        suggested_paper_action="hold",
+        report="Stored before the approval MVP.",
+    )
+    values = proposal.model_dump(mode="json")
+    connection = sqlite3.connect(database)
+    with connection:
+        connection.execute(
+            """
+            CREATE TABLE research_proposals (
+                proposal_id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                ticker TEXT NOT NULL,
+                analysis_date TEXT NOT NULL,
+                rating TEXT NOT NULL,
+                suggested_paper_action TEXT NOT NULL,
+                report TEXT NOT NULL,
+                source TEXT NOT NULL,
+                human_approval_required INTEGER NOT NULL,
+                approval_status TEXT NOT NULL,
+                order_created INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO research_proposals VALUES (
+                :proposal_id, :project_id, :ticker, :analysis_date, :rating,
+                :suggested_paper_action, :report, :source, :human_approval_required,
+                :approval_status, :order_created, :created_at
+            )
+            """,
+            values,
+        )
+    connection.close()
+
+    app = create_app(Settings(database_path=str(database)))
+    with TestClient(app) as client:
+        restored = client.get(
+            f"/api/v1/research/proposals/{proposal.proposal_id}"
+        ).json()
+        assert restored["approval_status"] == "pending"
+        assert restored["decided_at"] is None
+        assert restored["trade_id"] is None
+
+
 def test_dashboard_exposes_agent_proposal_form(tmp_path: Path) -> None:
     app = create_app(Settings(database_path=str(tmp_path / "control.db")))
     with TestClient(app) as client:
         response = client.get("/")
         assert response.status_code == 200
-        assert "MVP 1.2A Agent Proposal" in response.text
+        assert "MVP 1.2B Human Approval Gate" in response.text
         assert 'id="research-form"' in response.text
 
 

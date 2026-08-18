@@ -27,7 +27,7 @@ def create_app(app_settings: Settings = settings) -> FastAPI:
 
     application = FastAPI(
         title="Investment Town API",
-        version="0.4.0",
+        version="0.5.0",
         description="Control plane and multi-agent investment research backend.",
         lifespan=lifespan,
     )
