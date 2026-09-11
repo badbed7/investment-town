@@ -91,3 +91,13 @@ when the control API is deployed with multiple instances.
 ## Recommended first milestone
 
 Build the Control Center and Investment Town in **observation + paper trading mode** before any live-order integration.
+
+## Proposed Claw3D integration
+
+- [Claw3D 다중 LLM 시스템 재설계](docs/CLAW3D_MULTI_LLM_DESIGN.ko.md)
+- [판단·매수·매도 알고리즘 상세](docs/CLAW3D_ALGORITHMS.ko.md)
+- [Claw3D 구현·검증 계획](docs/CLAW3D_DELIVERY_PLAN.ko.md)
+
+These are design documents checked against the current main branch, the pending
+research-runtime work in PR #6, and a pinned Claw3D revision. The 3D integration and
+new trading algorithms have not yet been implemented or performance-validated.

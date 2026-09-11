@@ -10,8 +10,15 @@
 보유자산, 일반 주문과 조건주문을 제공한다. 인증은 OAuth 2.0 Client Credentials
 Grant이고, 계좌·자산·주문 요청에는 `X-Tossinvest-Account` 헤더가 추가로 필요하다.
 
-현재 공식 가이드의 연동 방식은 REST 전용이다. 시세 문서도 WebSocket을 추후 지원
-예정으로 안내하므로, 초기 설계는 REST 폴링과 주문 상태 재조회에 맞춘다.
+**추가 확인: 2026-09-11.** 공식 OpenAPI 1.2.15는 REST와 함께 시세·호가·본인 주문
+이벤트 WebSocket 및 별도의 AsyncAPI 문서를 안내한다. 기존의 “REST 전용,
+WebSocket 추후 지원” 가정은 갱신한다. REST는 계좌·주문·잔고 대조에 사용하고,
+WebSocket은 검증된 변경 알림 경로로 추가한다. 이번 확인에서는 AsyncAPI 본문을
+읽지 못했으므로 채널명·메시지·재접속 계약은 구현 단계에서 확인해야 한다.
+
+새 시스템 설계와 주문 상태·승인·멱등성 규칙은
+[Claw3D 통합 설계](CLAW3D_MULTI_LLM_DESIGN.ko.md)와
+[알고리즘 명세](CLAW3D_ALGORITHMS.ko.md)를 함께 따른다.
 
 공식 자료:
 
@@ -54,8 +61,9 @@ Deterministic risk gate -> Toss broker adapter -> Toss Securities Open API
 
 - `clientOrderId`를 멱등키로 저장하고 같은 키에 다른 주문 내용을 재사용하지 않는다.
 - `429`는 `Retry-After`와 rate-limit 응답 헤더를 따르고 지수 백오프와 jitter를 쓴다.
-- 주문 그룹은 통상 초당 6회, 09:00~09:10 KST에는 초당 3회로 더 낮으므로 자체
-  토큰 버킷을 공식 응답 한도보다 보수적으로 둔다.
+- 주문·시세 등 그룹별 한도는 그 시점의 공식 계약과 `X-RateLimit-*` 응답 헤더로
+  확인한다. 이전 문서의 고정 초당 요청 수를 현재 한도로 가정하지 않고, 자체 토큰
+  버킷을 확인된 한도보다 보수적으로 둔다.
 - 네트워크 단절·`500`에서 주문 생성 요청을 무조건 재시도하지 않는다. 먼저 주문
   내역을 대조해 중복 주문 가능성을 제거한다.
 - 1억원 이상 주문에 필요한 `confirmHighValueOrder=true`는 별도의 고액 주문 승인
